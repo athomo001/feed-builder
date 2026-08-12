@@ -1,0 +1,63 @@
+# Respaldo/plantilla del servicio feed-builder (ver README.md seccion 9).
+#
+# AUDITORIA.md P1: antes este archivo no era un Compose valido (le faltaba
+# la clave "services:"), asi que "docker compose -f feed-builder.yml config"
+# fallaba con "additional properties 'feed-builder' not allowed".
+#
+# Ahora es un Compose independiente y ejecutable:
+#   docker compose -f feed-builder.yml up -d
+# Requiere que la red "opencti-net" ya exista (la crea docker-compose.yml
+# principal); por eso se declara aqui como "external: true".
+#
+# Mantener sincronizado con el servicio feed-builder de docker-compose.yml
+# cuando cambien variables, volumenes o command.
+services:
+  feed-builder:
+    image: python:3.12-alpine
+    restart: always
+    # Nota: a diferencia del servicio dentro de docker-compose.yml, aqui no hay
+    # "depends_on: opencti" porque ese servicio no existe en este archivo
+    # standalone (docker compose no admite depender de un servicio externo al
+    # proyecto). El propio script reintenta la conexion SSE con backoff, asi
+    # que sobrevive a que OpenCTI todavia no este listo al arrancar.
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - FEEDS_DIR=/feeds
+      - MIN_SCORE=50
+      - MIN_CONFIDENCE=50
+      - ALLOW_TLP=tlp:clear,tlp:green
+      - REQUIRE_DETECTION=false
+      - DEBUG_DUMP_ONCE=false
+      - STATS_EVERY_SEC=60
+      - PROCESS_OBSERVABLE_HASHES=true
+      - WRITE_INTERVAL_SEC=0
+      - HASH_ONLY_SHA256=true
+      - HASH_RELAX_FILTERS=true
+      - BACKFILL_ENABLED=true
+      - BACKFILL_DAYS=30
+      - BACKFILL_PAGE_SIZE=200
+      - BACKFILL_MAX_PAGES=50
+      - PUBLIC_FEEDS_BASE_URL=https://10.0.100.13:8446/feeds
+      - STREAM_ID=
+    volumes:
+      - /opt/opencti/feed-builder:/app:ro
+      - /opt/opencti/feeds:/feeds
+    command: >
+      sh -lc '
+        set -eux;
+        pip install --no-cache-dir requests==2.32.3;
+        exec python -u /app/opencti_feed_builder.py
+      '
+    healthcheck:
+      test: ["CMD", "python", "/app/opencti_feed_builder.py", "--healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    networks:
+      - opencti-net
+
+networks:
+  opencti-net:
+    external: true

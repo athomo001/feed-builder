@@ -1,0 +1,34 @@
+# Secretos y configuracion local (AUDITORIA.md P0 - nunca versionar)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# nginx.conf real trae IP/hostname de la empresa (server_name, rutas de certs);
+# se versiona solo la plantilla generica.
+nginx.conf
+!nginx.conf.example
+
+# Estado y salidas en runtime del feed-builder legado
+feeds/
+state.json
+*.heartbeat
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Hub (Entrega 0+)
+hub/**/__pycache__/
+
+# Spec, configuracion local de Claude Code y auditoria interna:
+# no se versionan en este repo (contienen datos propios de la empresa).
+spec/
+.claude/
+AUDITORIA.md
+tests/

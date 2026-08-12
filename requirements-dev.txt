@@ -1,0 +1,7 @@
+-r requirements.txt
+pytest>=8
+pydantic>=2
+
+# pydantic aqui es la dependencia real de hub/ (Entrega 0: contratos).
+# Cuando la Entrega 2 introduzca el Admin API (FastAPI), hub/ debe pasar a
+# tener su propio archivo de dependencias/paquete, separado del script legado.

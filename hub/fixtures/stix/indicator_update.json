@@ -1,0 +1,31 @@
+{
+  "_comment": "Mismo stix_id que indicator_create.json con score y valid_until cambiados: representa un evento update sobre el mismo indicator (spec/02 'Un update puede cambiar el valor, el tipo, el marking, score, confidence o vigencia').",
+  "action": "update",
+  "data": {
+    "data": {
+      "id": "indicator--3f2a1100-0000-4000-8000-000000000002",
+      "type": "indicator",
+      "pattern": "[file:hashes.'SHA-256' = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']",
+      "pattern_type": "stix",
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "created": "2026-08-10T12:00:00.000Z",
+      "modified": "2026-08-11T09:30:00.000Z",
+      "valid_until": "2026-09-10T00:00:00.000Z",
+      "revoked": false,
+      "confidence": 95,
+      "labels": ["malware", "tlp:clear"],
+      "object_marking_refs": ["marking-definition--tlp-clear"],
+      "extensions": {
+        "extension-definition--opencti": {
+          "extension_type": "property-extension",
+          "score": 60,
+          "detection": true,
+          "main_observable_type": "StixFile",
+          "observable_values": [
+            {"type": "StixFile", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,676 @@
+services:
+
+  ###########################
+  # EDGE / PROXY            #
+  ###########################
+
+  nginx:
+    image: nginx:stable
+    restart: always
+    ports:
+      - "${NGINX_HTTPS_PORT}:443"
+    volumes:
+      - ${NGINX_CONF_PATH}:/etc/nginx/nginx.conf:ro
+      - ${NGINX_CERTS_PATH}:/etc/nginx/certs:ro
+      - ${NGINX_FEEDS_PATH}:/usr/share/nginx/html/feeds:ro
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-net
+    mem_limit: ${NGINX_MEM_LIMIT}
+    cpus: ${NGINX_CPU_LIMIT}
+
+  ###########################
+  # DEPENDENCIES            #
+  ###########################
+
+  # Generate RSA key for xtm-composer (PKCS#8 format)
+  rsa-key-generator:
+    image: alpine/openssl:3.5.4
+    volumes:
+      - rsakeys:/keys
+    entrypoint: ["/bin/ash"]
+    command: ["-c", "if [ ! -f /keys/private_key.pem ]; then openssl genpkey -algorithm RSA -out /keys/private_key.pem -pkeyopt rsa_keygen_bits:4096; fi && tail -f /dev/null"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/keys/private_key.pem"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - opencti-net
+    restart: always
+
+  redis:
+    image: redis:8.4.0
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory ${REDIS_MAX_MEMORY}
+      --maxmemory-policy allkeys-lru
+    restart: always
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - opencti-net
+    mem_limit: ${REDIS_MEM_LIMIT}
+    cpus: ${REDIS_CPU_LIMIT}
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.9
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    environment:
+      - discovery.type=single-node
+      - xpack.ml.enabled=false
+      - xpack.security.enabled=false
+      - thread_pool.search.queue_size=5000
+      - logger.org.elasticsearch.discovery="ERROR"
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms${ELASTIC_MEMORY_SIZE} -Xmx${ELASTIC_MEMORY_SIZE}"
+    restart: always
+    mem_limit: 3072m  # ← AGREGAR ESTO (heap 2G + overhead 560MB)
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://elasticsearch:9200/_cluster/health?wait_for_status=yellow >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 50
+    networks:
+      - opencti-net
+
+  minio:
+    image: minio/minio:RELEASE.2025-06-13T11-33-47Z
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data
+    restart: always
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - opencti-net
+
+  rabbitmq:
+    image: rabbitmq:4.2-management
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS}
+      - RABBITMQ_NODENAME=rabbit01@localhost
+    volumes:
+      - type: bind
+        source: ./rabbitmq.conf
+        target: /etc/rabbitmq/rabbitmq.conf
+      - rabbitmq_data:/var/lib/rabbitmq
+    restart: always
+    mem_limit: 2g
+    cpus: 1.0
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    networks:
+      - opencti-net
+
+  ###########################
+  # COMMON                  #
+  ###########################
+
+  xtm-composer:
+    image: filigran/xtm-composer:1.0.2
+    platform: linux/amd64
+    environment:
+      - MANAGER__ID=${XTM_COMPOSER_ID}
+      - "MANAGER__NAME=XTM Integrations Manager"
+      - MANAGER__CREDENTIALS_KEY_FILEPATH=/keys/private_key.pem
+      - OPENCTI__ENABLE=true
+      - OPENCTI__URL=http://opencti:8080
+      - OPENCTI__TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - OPENCTI__DAEMON__SELECTOR=docker
+      - OPENCTI__DAEMON__DOCKER__NETWORK_MODE=${OPENCTI_DOCKER_NETWORK}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - rsakeys:/keys:ro
+    depends_on:
+      rsa-key-generator:
+        condition: service_healthy
+      opencti:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - opencti-net
+    restart: always
+
+  ###########################
+  # OPENCTI                 #
+  ###########################
+
+  opencti:
+    image: opencti/platform:6.9.21
+    environment:
+      - NODE_OPTIONS=--max-old-space-size=${OPENCTI_NODE_MAX_OLD_SPACE}
+      - APP__PORT=8080
+      - APP__BASE_URL=${OPENCTI_BASE_URL}
+      - APP__ADMIN__EMAIL=${OPENCTI_ADMIN_EMAIL}
+      - APP__ADMIN__PASSWORD=${OPENCTI_ADMIN_PASSWORD}
+      - APP__ADMIN__TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - REDIS__HOSTNAME=redis
+      - REDIS__PORT=6379
+      - ELASTICSEARCH__URL=http://elasticsearch:9200
+      - ELASTICSEARCH__NUMBER_OF_REPLICAS=0
+      - MINIO__ENDPOINT=minio
+      - MINIO__PORT=9000
+      - MINIO__USE_SSL=false
+      - MINIO__ACCESS_KEY=${MINIO_ROOT_USER}
+      - MINIO__SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - RABBITMQ__HOSTNAME=rabbitmq
+      - RABBITMQ__PORT=5672
+      - RABBITMQ__PORT_MANAGEMENT=15672
+      - RABBITMQ__MANAGEMENT_SSL=false
+      - RABBITMQ__USERNAME=${RABBITMQ_DEFAULT_USER}
+      - RABBITMQ__PASSWORD=${RABBITMQ_DEFAULT_PASS}
+      - SMTP__HOSTNAME=${SMTP_HOSTNAME}
+      - SMTP__PORT=25
+      - PROVIDERS__LOCAL__STRATEGY=LocalStrategy
+      - APP__HEALTH_ACCESS_KEY=${OPENCTI_HEALTHCHECK_ACCESS_KEY}
+    ports:
+      - "${OPENCTI_PORT}:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - opencti-net
+    mem_limit: ${OPENCTI_MEM_LIMIT}
+    cpus: ${OPENCTI_CPU_LIMIT}
+    restart: always
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://opencti:8080/health?health_access_key=${OPENCTI_HEALTHCHECK_ACCESS_KEY}"]
+      interval: 30s
+      timeout: 10s
+      retries: 15
+
+  worker:
+    image: opencti/worker:6.9.21
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - WORKER_CONCURRENCY=2
+    depends_on:
+      opencti:
+        condition: service_healthy
+    deploy:
+      mode: replicated
+      replicas: 3
+    networks:
+      - opencti-net
+    mem_limit: ${WORKER_MEM_LIMIT}
+    cpus: ${WORKER_CPU_LIMIT}
+    restart: always
+
+  ###########################
+  # OPENCTI CONNECTORS      #
+  ###########################
+
+  connector-export-file-stix:
+    image: opencti/connector-export-file-stix:6.9.21
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_EXPORT_FILE_STIX_ID}
+      - CONNECTOR_TYPE=INTERNAL_EXPORT_FILE
+      - CONNECTOR_NAME=ExportFileStix2
+      - CONNECTOR_SCOPE=application/json
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-net
+
+  connector-export-file-csv:
+    image: opencti/connector-export-file-csv:6.9.21
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_EXPORT_FILE_CSV_ID}
+      - CONNECTOR_TYPE=INTERNAL_EXPORT_FILE
+      - CONNECTOR_NAME=ExportFileCsv
+      - CONNECTOR_SCOPE=text/csv
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-net
+
+  connector-export-file-txt:
+    image: opencti/connector-export-file-txt:6.9.21
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_EXPORT_FILE_TXT_ID}
+      - CONNECTOR_TYPE=INTERNAL_EXPORT_FILE
+      - CONNECTOR_NAME=ExportFileTxt
+      - CONNECTOR_SCOPE=text/plain
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-net
+
+  connector-import-file-stix:
+    image: opencti/connector-import-file-stix:6.9.21
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_IMPORT_FILE_STIX_ID}
+      - CONNECTOR_TYPE=INTERNAL_IMPORT_FILE
+      - CONNECTOR_NAME=ImportFileStix
+      - CONNECTOR_VALIDATE_BEFORE_IMPORT=true
+      - CONNECTOR_SCOPE=application/json,text/xml
+      - CONNECTOR_AUTO=true
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-net
+
+  connector-import-document:
+    image: opencti/connector-import-document:6.9.21
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_IMPORT_DOCUMENT_ID}
+      - CONNECTOR_TYPE=INTERNAL_IMPORT_FILE
+      - CONNECTOR_NAME=ImportDocument
+      - CONNECTOR_VALIDATE_BEFORE_IMPORT=true
+      - CONNECTOR_SCOPE=application/pdf,text/plain,text/html
+      - CONNECTOR_AUTO=true
+      - CONNECTOR_ONLY_CONTEXTUAL=false
+      - IMPORT_DOCUMENT_CREATE_INDICATOR=true
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-net
+
+  connector-import-file-yara:
+    image: opencti/connector-import-file-yara:6.9.21
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_IMPORT_FILE_YARA_ID}
+      - CONNECTOR_NAME=ImportFileYARA
+      - CONNECTOR_VALIDATE_BEFORE_IMPORT=true
+      - CONNECTOR_SCOPE=text/yara+plain
+      - CONNECTOR_AUTO=false
+      - YARA_IMPORT_FILE_SPLIT_RULES=true
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-net
+
+  connector-analysis:
+    image: opencti/connector-import-document:6.9.21
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_ANALYSIS_ID}
+      - CONNECTOR_TYPE=INTERNAL_ANALYSIS
+      - CONNECTOR_NAME=ImportDocumentAnalysis
+      - CONNECTOR_VALIDATE_BEFORE_IMPORT=false
+      - CONNECTOR_SCOPE=application/pdf,text/plain,text/html
+      - CONNECTOR_AUTO=true
+      - CONNECTOR_ONLY_CONTEXTUAL=false
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-net
+
+  connector-import-external-reference:
+    image: opencti/connector-import-external-reference:6.9.21
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_IMPORT_EXTERNAL_REFERENCE_ID}
+      - CONNECTOR_NAME=ImportExternalReference
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-net
+
+  ###########################
+  # OPENCTI DEFAULT DATA    #
+  ###########################
+
+  connector-opencti:
+    image: opencti/connector-opencti:6.9.21
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_OPENCTI_ID}
+      - "CONNECTOR_NAME=OpenCTI Datasets"
+      - CONNECTOR_SCOPE=marking-definition,identity,location
+      - CONNECTOR_AUTO_CREATE_SERVICE_ACCOUNT=true
+      - CONNECTOR_AUTO_CREATE_SERVICE_ACCOUNT_CONFIDENCE_LEVEL=100
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-net
+
+  connector-mitre:
+    image: opencti/connector-mitre:6.9.21
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_MITRE_ID}
+      - CONNECTOR_AUTO_CREATE_SERVICE_ACCOUNT=true
+      - CONNECTOR_AUTO_CREATE_SERVICE_ACCOUNT_CONFIDENCE_LEVEL=75
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    networks:
+      - opencti-net
+
+  ###########################
+  # CUSTOM CONNECTORS       #
+  ###########################
+
+  connector-misp:
+    image: opencti/connector-misp:6.9.21
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_MISP_ID}
+      - CONNECTOR_TYPE=EXTERNAL_IMPORT
+      - CONNECTOR_NAME=${CONNECTOR_MISP_NAME}
+      - CONNECTOR_SCOPE=misp
+      - CONNECTOR_CONFIDENCE_LEVEL=70
+      - CONNECTOR_UPDATE_EXISTING_DATA=true
+      - CONNECTOR_LOG_LEVEL=debug
+      - MISP_URL=https://misp.csirt.gob.cl
+      - MISP_KEY=${MISP_KEY}
+      - MISP_DEFAULT_AUTHOR=ANCI Chile
+      - MISP_SSL_VERIFY=true
+      - MISP_LOG_REQUESTS=false
+      - MISP_CREATE_REPORTS=true
+      - MISP_CREATE_INDICATORS=true
+      - MISP_CREATE_OBSERVABLES=true
+      - MISP_CREATE_SIGHTINGS=true
+      - MISP_IMPORT_FROM_DATE=2024-01-01
+      - MISP_IMPORT_TAGS_AS_LABELS=true
+      - MISP_IMPORT_GALAXIES_AS_TAGS=true
+      - MISP_IMPORT_NOT_PUBLISHED=false
+      - MISP_RECURSIVE_TAGS=true
+      - MISP_FILTER_TAG=OpenCTI:import
+      - MISP_FILTER_PUBLISHED=true
+      - MISP_INTERVAL=3600
+    networks:
+      - opencti-net
+
+  connector-abuseipdb-ipblacklist:
+    image: opencti/connector-abuseipdb-ipblacklist:6.6.0
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_ABUSEIPDB_ID}
+      - CONNECTOR_NAME=AbuseIPDB IP Blacklist
+      - CONNECTOR_SCOPE=abuseipdb
+      - CONNECTOR_LOG_LEVEL=error
+      - ABUSEIPDB_URL=https://api.abuseipdb.com/api/v2/blacklist
+      - ABUSEIPDB_API_KEY=${ABUSEIPDB_API_KEY}
+      - ABUSEIPDB_SCORE=65
+      - ABUSEIPDB_LIMIT=10000
+      - ABUSEIPDB_INTERVAL=${ABUSEIPDB_INTERVAL}
+    networks:
+      - opencti-net
+
+  connector-malwarebazaar-recent-additions:
+    image: opencti/connector-malwarebazaar-recent-additions:latest
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_MALWAREBAZAAR_ID}
+      - CONNECTOR_NAME=MalwareBazaar Recent Additions
+      - CONNECTOR_LOG_LEVEL=info
+      - CONNECTOR_CREATE_INDICATOR_AUTHOR=false
+      - MALWAREBAZAAR_RECENT_ADDITIONS_API_KEY=${MALWAREBAZAAR_AUTH_KEY}
+      - MALWAREBAZAAR_RECENT_ADDITIONS_API_URL=https://mb-api.abuse.ch/api/v1/
+      - MALWAREBAZAAR_RECENT_ADDITIONS_COOLDOWN_SECONDS=21600
+      - MALWAREBAZAAR_RECENT_ADDITIONS_LABELS=malware-bazaar
+      - MALWAREBAZAAR_RECENT_ADDITIONS_INCLUDE_TAGS=exe,dll,docm,docx,doc,xls,xlsx,xlsm,js
+      - MALWAREBAZAAR_RECENT_ADDITIONS_LABELS_COLOR=#54483b
+    networks:
+      - opencti-net
+
+  connector-alienvault:
+    image: opencti/connector-alienvault:6.7.2
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_ALIENVAULT_ID}
+      - CONNECTOR_NAME=AlienVault
+      - CONNECTOR_SCOPE=alienvault
+      - CONNECTOR_LOG_LEVEL=info
+      - CONNECTOR_DURATION_PERIOD=PT30M
+      - ALIENVAULT_BASE_URL=https://otx.alienvault.com
+      - ALIENVAULT_API_KEY=${ALIENVAULT_API_KEY}
+      - ALIENVAULT_TLP=White
+      - ALIENVAULT_CREATE_OBSERVABLES=true
+      - ALIENVAULT_CREATE_INDICATORS=true
+      - ALIENVAULT_PULSE_START_TIMESTAMP=2025-02-01T00:00:00
+      - ALIENVAULT_REPORT_TYPE=threat-report
+      - ALIENVAULT_REPORT_STATUS=New
+      - ALIENVAULT_GUESS_MALWARE=false
+      - ALIENVAULT_GUESS_CVE=false
+      - ALIENVAULT_EXCLUDED_PULSE_INDICATOR_TYPES=FileHash-MD5,FileHash-SHA1
+      - ALIENVAULT_ENABLE_RELATIONSHIPS=true
+      - ALIENVAULT_ENABLE_ATTACK_PATTERNS_INDICATES=false
+      - ALIENVAULT_INTERVAL_SEC=1800
+      - ALIENVAULT_DEFAULT_X_OPENCTI_SCORE=50
+      - ALIENVAULT_X_OPENCTI_SCORE_IP=60
+      - ALIENVAULT_X_OPENCTI_SCORE_DOMAIN=70
+      - ALIENVAULT_X_OPENCTI_SCORE_HOSTNAME=75
+      - ALIENVAULT_X_OPENCTI_SCORE_EMAIL=70
+      - ALIENVAULT_X_OPENCTI_SCORE_FILE=85
+      - ALIENVAULT_X_OPENCTI_SCORE_URL=80
+      - ALIENVAULT_X_OPENCTI_SCORE_MUTEX=60
+      - ALIENVAULT_X_OPENCTI_SCORE_CRYPTOCURRENCY_WALLET=80
+    networks:
+      - opencti-net
+
+  connector-cisa-known-exploited-vulnerabilities:
+    image: opencti/connector-cisa-known-exploited-vulnerabilities:6.7.2
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${CONNECTOR_CISA_KEV_ID}
+      - CONNECTOR_NAME=CISA Known Exploited Vulnerabilities
+      - CONNECTOR_SCOPE=cisa
+      - CONNECTOR_RUN_AND_TERMINATE=false
+      - CONNECTOR_LOG_LEVEL=error
+      - CONNECTOR_DURATION_PERIOD=P2D
+      - CISA_CATALOG_URL=https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+      - CISA_CREATE_INFRASTRUCTURES=false
+      - CISA_TLP=TLP:CLEAR
+    networks:
+      - opencti-net
+
+  connector-qradar:
+    image: opencti/connector-qradar:6.6.0
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - CONNECTOR_ID=${QRADAR_CONNECTOR_ID}
+      - CONNECTOR_NAME=${QRADAR_CONNECTOR_NAME}
+      - CONNECTOR_SCOPE=qradar
+      - CONNECTOR_CONFIDENCE_LEVEL=4
+      - CONNECTOR_LOG_LEVEL=info
+      - CONNECTOR_CONSUMER_COUNT=1
+      - CONNECTOR_LIVE_STREAM_ID=${QRADAR_LIVE_STREAM_ID}
+      - CONNECTOR_LIVE_STREAM_LISTEN_DELETE=true
+      - CONNECTOR_LIVE_STREAM_NO_DEPENDENCIES=true
+      - QRADAR_URL=${QRADAR_URL}
+      - QRADAR_SSL_VERIFY=${QRADAR_SSL_VERIFY}
+      - QRADAR_TOKEN=${QRADAR_TOKEN}
+      - QRADAR_REFERENCE_NAME=${QRADAR_REFERENCE_NAME}
+      - QRADAR_IGNORE_TYPES=${QRADAR_IGNORE_TYPES}
+      - REQUESTS_CA_BUNDLE=/etc/ssl/certs/netics-SERVICES-CA.crt
+    volumes:
+      - /opt/opencti/certs/netics-SERVICES-CA.crt:/etc/ssl/certs/netics-SERVICES-CA.crt:ro
+    networks:
+      - opencti-net
+
+  connector-malpedia-rss:
+    image: python:3.12-alpine
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - RSS_URL=https://malpedia.caad.fkie.fraunhofer.de/feeds/rss/latest
+      - FORCE_REPROCESS=${MALPEDIA_RSS_FORCE_REPROCESS}
+    volumes:
+      - ${MALPEDIA_RSS_APP_PATH}:/app:ro
+      - malpedia_rss_data:/data
+      - malpedia_rss_sitepkgs:/usr/local/lib/python3.12/site-packages
+      - malpedia_rss_bin:/usr/local/bin
+    command: >
+      sh -lc 'python -c "import requests,feedparser,dateutil" >/dev/null 2>&1
+      || pip install --no-cache-dir -r /app/requirements.txt;
+      exec python -u /app/malpedia_rss_to_opencti.py'
+    networks:
+      - opencti-net
+
+  feed-builder:
+    image: python:3.12-alpine
+    restart: always
+    depends_on:
+      opencti:
+        condition: service_healthy
+    environment:
+      - OPENCTI_URL=http://opencti:8080
+      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
+      - FEEDS_DIR=/feeds
+      - MIN_SCORE=50
+      - MIN_CONFIDENCE=50
+      - ALLOW_TLP=tlp:clear,tlp:green
+      - REQUIRE_DETECTION=false
+      - DEBUG_DUMP_ONCE=false
+      - STATS_EVERY_SEC=60
+      - PROCESS_OBSERVABLE_HASHES=true
+      - WRITE_INTERVAL_SEC=${FEED_BUILDER_WRITE_INTERVAL_SEC}
+      - MAX_RECORDS_PER_FEED=${FEED_BUILDER_MAX_RECORDS_PER_FEED:-20000}
+      - URL_STRIP_SCHEME=${FEED_BUILDER_URL_STRIP_SCHEME:-true}
+      - URL_KEEP_QUERY=${FEED_BUILDER_URL_KEEP_QUERY:-true}
+      - HASH_ONLY_SHA256=true
+      - HASH_RELAX_FILTERS=true
+      - BACKFILL_ENABLED=${FEED_BUILDER_BACKFILL_ENABLED:-false}
+      - BACKFILL_DAYS=30
+      - BACKFILL_PAGE_SIZE=200
+      - BACKFILL_MAX_PAGES=${FEED_BUILDER_BACKFILL_MAX_PAGES:-10}
+      - PUBLIC_FEEDS_BASE_URL=https://10.0.100.13:8446/feeds
+      - STREAM_ID=
+      # AQUÍ AÑADES TUS TTLs CUSTOM (la duracion de dato):
+      - MAX_AGE_DAYS_IP=15
+      - MAX_AGE_DAYS_URL=15
+      - MAX_AGE_DAYS_HASH=15
+    volumes:
+      - ${FEED_BUILDER_APP_PATH}:/app:ro
+      - ${FEEDS_OUTPUT_PATH}:/feeds
+    command: >
+      sh -lc '
+        set -eux;
+        pip install --no-cache-dir requests==2.32.3;
+        exec python -u /app/opencti_feed_builder.py
+      '
+    healthcheck:
+      # AUDITORIA.md P2: sin esto, Docker consideraba "vivo" un proceso cuyo
+      # stream estaba atascado. --healthcheck lee el heartbeat en disco.
+      test: ["CMD", "python", "/app/opencti_feed_builder.py", "--healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    networks:
+      - opencti-net
+
+volumes:
+  opencti_data:
+  es_data:
+  minio_data:
+  rabbitmq_data:
+  redis_data:
+  neo4j_data:
+  malpedia_rss_data:
+  malpedia_rss_sitepkgs:
+  malpedia_rss_bin:
+  rsakeys:
+
+networks:
+  opencti-net:
+    driver: bridge

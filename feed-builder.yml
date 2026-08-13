@@ -38,7 +38,7 @@ services:
       - BACKFILL_DAYS=30
       - BACKFILL_PAGE_SIZE=200
       - BACKFILL_MAX_PAGES=50
-      - PUBLIC_FEEDS_BASE_URL=https://10.0.100.13:8446/feeds
+      - PUBLIC_FEEDS_BASE_URL=https://${PUBLIC_HOST}:${NGINX_HTTPS_PORT}/feeds
       - STREAM_ID=
     volumes:
       - /opt/opencti/feed-builder:/app:ro

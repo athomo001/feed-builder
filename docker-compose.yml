@@ -7,10 +7,19 @@ services:
   nginx:
     image: nginx:stable
     restart: always
+    environment:
+      - PUBLIC_HOST=${PUBLIC_HOST}
+      - NGINX_HTTPS_PORT=${NGINX_HTTPS_PORT}
+    entrypoint: ["/bin/sh", "-c"]
+    # command como lista de UN elemento: si fuera un string plano, Compose lo
+    # parte con shlex antes de pasarlo a "sh -c", y "<"/">"/"&&" dejan de
+    # interpretarse como shell (se pasan como argv sueltos a sh -c, que solo
+    # ejecuta el primer argumento). Con un solo elemento no hay split.
+    command: ["envsubst '$$PUBLIC_HOST $$NGINX_HTTPS_PORT' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"]
     ports:
       - "${NGINX_HTTPS_PORT}:443"
     volumes:
-      - ${NGINX_CONF_PATH}:/etc/nginx/nginx.conf:ro
+      - ${NGINX_CONF_PATH}:/etc/nginx/nginx.conf.template:ro
       - ${NGINX_CERTS_PATH}:/etc/nginx/certs:ro
       - ${NGINX_FEEDS_PATH}:/usr/share/nginx/html/feeds:ro
     depends_on:
@@ -633,7 +642,7 @@ services:
       - BACKFILL_DAYS=30
       - BACKFILL_PAGE_SIZE=200
       - BACKFILL_MAX_PAGES=${FEED_BUILDER_BACKFILL_MAX_PAGES:-10}
-      - PUBLIC_FEEDS_BASE_URL=https://10.0.100.13:8446/feeds
+      - PUBLIC_FEEDS_BASE_URL=https://${PUBLIC_HOST}:${NGINX_HTTPS_PORT}/feeds
       - STREAM_ID=
       # AQUÍ AÑADES TUS TTLs CUSTOM (la duracion de dato):
       - MAX_AGE_DAYS_IP=15

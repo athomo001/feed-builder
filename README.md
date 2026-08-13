@@ -22,9 +22,9 @@ El servicio:
 
 Rutas esperadas de consumo:
 
-- https://10.0.100.13:8446/feeds/ip.txt
-- https://10.0.100.13:8446/feeds/url.txt
-- https://10.0.100.13:8446/feeds/hash.txt
+- https://opencti.example.local:8446/feeds/ip.txt
+- https://opencti.example.local:8446/feeds/url.txt
+- https://opencti.example.local:8446/feeds/hash.txt
 
 ## 2) Que contiene este repositorio
 
@@ -66,10 +66,11 @@ Rutas esperadas de consumo:
 
 ## 4.3 Requisitos de Nginx
 
-- Certificados presentes segun nginx.conf:
-  - /etc/nginx/certs/10.0.100.13.crt
-  - /etc/nginx/certs/10.0.100.13.key
-- Puerto HTTPS publicado (8446 segun .env actual).
+- `nginx.conf` es una plantilla: `server_name`, la redirección HTTP->HTTPS y las rutas de certificado usan `${PUBLIC_HOST}`/`${NGINX_HTTPS_PORT}`, resueltos con `envsubst` al arrancar el contenedor (ver servicio `nginx` en `docker-compose.yml`). No hardcodear IPs/hosts en este archivo.
+- Certificados presentes, con nombre de archivo igual a `PUBLIC_HOST` (variable en `.env`):
+  - /etc/nginx/certs/\$PUBLIC_HOST.crt
+  - /etc/nginx/certs/\$PUBLIC_HOST.key
+- Puerto HTTPS publicado (`NGINX_HTTPS_PORT` en `.env`, 8446 por defecto).
 
 ## 5) Puesta en marcha
 
@@ -92,9 +93,9 @@ docker compose logs -f nginx
 5. Probar feeds desde red interna:
 
 ```bash
-curl -k https://10.0.100.13:8446/feeds/ip.txt
-curl -k https://10.0.100.13:8446/feeds/url.txt
-curl -k https://10.0.100.13:8446/feeds/hash.txt
+curl -k https://opencti.example.local:8446/feeds/ip.txt
+curl -k https://opencti.example.local:8446/feeds/url.txt
+curl -k https://opencti.example.local:8446/feeds/hash.txt
 ```
 
 ## 6) Como funciona el script opencti_feed_builder.py
@@ -239,8 +240,9 @@ Nota importante:
 ## 8.2 Ajustes de publicacion
 
 - Puerto HTTPS expuesto por Nginx (NGINX_HTTPS_PORT).
-- Certificados TLS y server_name en nginx.conf.
-- URL publica de referencia en logs (PUBLIC_FEEDS_BASE_URL).
+- Host/IP publico (PUBLIC_HOST en .env): resuelve `server_name` y las rutas de certificado en nginx.conf via envsubst, y compone PUBLIC_FEEDS_BASE_URL. Nunca hardcodear el host en nginx.conf ni en docker-compose.yml directamente.
+- Certificados TLS nombrados como `$PUBLIC_HOST.crt`/`$PUBLIC_HOST.key`.
+- URL publica de referencia en logs (PUBLIC_FEEDS_BASE_URL, ahora compuesta desde PUBLIC_HOST + NGINX_HTTPS_PORT en docker-compose.yml/feed-builder.yml).
 
 ## 9) Respaldo de docker-compose
 

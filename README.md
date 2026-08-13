@@ -1,5 +1,11 @@
 # Feed Builder para OpenCTI
 
+**Autor:** Athan Espinoza
+
+> Historial de cambios por versión en [CHANGELOG.md](CHANGELOG.md). Versión actual del Hub: `hub.__version__` (ver [hub/\_\_init\_\_.py](hub/__init__.py)).
+>
+> Este README documenta el script legado `opencti_feed_builder.py`, hoy en producción. El rediseño en curso (`hub/`, "OpenCTI IOC Distribution Hub") sigue la especificación modular en [spec/](spec/README.md); ver la sección [13) Hub - rediseno (Entrega 1)](#13-hub---rediseno-entrega-1) más abajo para instalarlo y probarlo.
+
 ## 1) Objetivo del proyecto
 
 Este proyecto implementa un servicio llamado Feed Builder integrado a OpenCTI para automatizar la publicacion de indicadores de compromiso (IOC) consumibles por firewalls y otras herramientas de seguridad.
@@ -296,3 +302,108 @@ docker compose restart nginx
 - Implementacion en marcha blanca (desarrollo personalizado).
 - Flujo end-to-end operativo: OpenCTI stream -> filtro -> txt -> Nginx HTTPS.
 - Hay espacio de mejora para alinear completamente el comportamiento con algunas variables de compose no usadas todavia (MAX_RECORDS_PER_FEED, URL_STRIP_SCHEME, URL_KEEP_QUERY).
+
+## 13) Hub - rediseno (Entrega 1)
+
+El paquete `hub/` es el rediseno especificado en [spec/](spec/README.md), separado del script legado (`opencti_feed_builder.py`) y de su configuracion. Cubre la Entrega 0 (contratos) y la Entrega 1 (Nucleo confiable: `spec/09-ROADMAP-ACCEPTANCE.md`) — ver el estado real componente por componente en [spec/PROJECT-MAP.md](spec/PROJECT-MAP.md). El Admin API de Entrega 2 (FastAPI, CRUD de destinos/politicas, adapters) esta documentado por separado en la seccion [14](#14-admin-api---rediseno-entrega-2).
+
+### 13.1 Instalacion
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+`hub/` tiene su propio archivo de dependencias (`hub/requirements.txt`, `hub/requirements-dev.txt`), separado del script legado; el comando de arriba instala todo (legado + Hub + Admin API) via los `-r` anidados.
+
+### 13.2 Variables de entorno del Hub
+
+Archivo de configuracion propio, separado del `.env` de OpenCTI (spec/02 "Configuracion minima de conexion"; ninguna variable compartida del stack de OpenCTI se lee desde aqui):
+
+| Variable | Obligatoria | Default | Para que sirve |
+| --- | --- | --- | --- |
+| `OPENCTI_URL` | Si | — | Base URL de OpenCTI |
+| `OPENCTI_SERVICE_ACCOUNT_TOKEN` | Si | — | Token del service account dedicado del Hub (nunca `OPENCTI_ADMIN_TOKEN`) |
+| `OPENCTI_STREAM_ID` | No | stream general | Live Stream especifico a consumir |
+| `OPENCTI_TLS_VERIFY` | No | `true` | `false` solo en desarrollo local |
+| `OPENCTI_CA_CERT_PATH` | No | — | CA interna/autofirmada |
+| `POLICY_TTL_DAYS` | No | `30` | TTL por defecto usado en `effective_expiration` |
+| `BACKFILL_WINDOW_DAYS` / `BACKFILL_MAX_PAGES` / `BACKFILL_PAGE_SIZE` | No | `7` / `10` / `100` | Alcance del backfill inicial y de cada reconciliacion |
+| `RECONCILE_INTERVAL_SECONDS` | No | `600` | Cadencia de reconciliacion GraphQL periodica |
+| `MAX_SSE_LINE_BYTES` / `MAX_SSE_EVENT_BYTES` | No | `262144` / `2097152` | Limites de tamano SSE (spec/03 "Limites") |
+| `TXT_FEED_DIR` / `TXT_FEED_MAX_RECORDS` | No | `./feeds` / `20000` | Carpeta de feeds TXT y capacidad por archivo |
+| `HUB_SOURCE_ID` | No | `opencti-main` | Identificador de fuente en el evento canonico y el cursor |
+| `HUB_STATE_DIR` | No | `./state` | SQLite de cursor/ledger y heartbeat |
+
+### 13.3 Correr el Hub
+
+```bash
+python -m hub.service
+python -m hub.service --healthcheck   # exit 0/1 segun heartbeat reciente
+```
+
+Apagado ordenado con `Ctrl+C`/`SIGTERM`: termina el evento en curso y cierra (cada evento aceptado hacia un destino `txt_feed` ya reconstruye su archivo al procesarse, `hub/adapters/txt_feed_adapter.py`).
+
+### 13.4 Tests
+
+```bash
+pytest
+```
+
+La suite de `tests/hub/` cubre los contratos de Entrega 0, el nucleo de Entrega 1 (normalizacion, dedup, TTL, cursor, ledger, SSE, cliente GraphQL, backfill, reconciliacion, escritura TXT) y el Admin API de Entrega 2 (destinos, politicas, adapters, retries/circuit breaker, endpoints FastAPI) contra fixtures, GraphQL simulado y `requests` simulado — no contra una instancia OpenCTI o un destino real (ver limites documentados en spec/PROJECT-MAP.md).
+
+### 13.5 Backup y restore
+
+El estado durable vive en `HUB_STATE_DIR` (`cursor.sqlite3`, `ledger.sqlite3`, `destinations.sqlite3`, `policies.sqlite3`, `tokens.sqlite3`, `idempotency.sqlite3`, `.heartbeat`) y los feeds materializados en `TXT_FEED_DIR`. Para respaldar, copiar ambos directorios con el proceso detenido o usando `sqlite3 .backup` sobre los `.sqlite3`; para restaurar, reponer los archivos antes de arrancar `hub.service`/`hub.api` (el estado se recarga solo al iniciar).
+
+## 14) Admin API - rediseno (Entrega 2)
+
+FastAPI en `hub/api/` (spec/09-ROADMAP-ACCEPTANCE.md Entrega 2: "API y primer destino"). Comparte el mismo `HUB_STATE_DIR` que `hub.service` pero es un proceso separado (spec/03 "Admin API: servicio separado del consumidor OpenCTI").
+
+### 14.1 Correr el Admin API
+
+```bash
+python -m hub.api
+# variables opcionales: HUB_API_HOST (default 0.0.0.0), HUB_API_PORT (default 8000)
+```
+
+Docs interactivas en `/admin/api/v1/docs`, OpenAPI en `/admin/api/v1/openapi.json`.
+
+### 14.2 Autenticacion
+
+API tokens locales (spec/08 decision #5, sin OIDC/SSO todavia): un token se genera una sola vez, se persiste solo su hash. No hay endpoint HTTP para crear el primer token (seria un huevo-y-gallina de auth); se genera con un script corto contra el mismo `tokens.sqlite3`:
+
+```bash
+python -c "
+from hub.api.token_store import init_db, create_token
+conn = init_db('/ruta/a/HUB_STATE_DIR/tokens.sqlite3')
+token, plaintext = create_token(conn, role='security-admin')
+print(plaintext)  # guardarlo ahora: no se puede volver a mostrar
+"
+```
+
+Roles (spec/08, jerarquicos: uno mayor cubre las acciones de uno menor): `viewer` < `operator` < `policy-admin` < `security-admin`.
+
+### 14.3 Ejemplo: alta de un destino TXT + politica + publicacion
+
+```bash
+TOKEN=... # token con rol security-admin/policy-admin segun el paso
+
+curl -s -X POST http://localhost:8000/admin/api/v1/destinations \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"destination_id": "fortigate-prod", "name": "Fortigate", "adapter": "txt_feed",
+       "allowed_ioc_types": ["hash/sha256"], "capacity": {"max_records_per_file": 20000}}'
+
+curl -s -X POST http://localhost:8000/admin/api/v1/policies \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"policy_id": "fortigate-policy", "destination_id": "fortigate-prod",
+       "allowed_iocs": [{"family": "hash", "subtypes": ["sha256"]}], "ttl_days": {"sha256": 60}}'
+
+curl -s -X POST http://localhost:8000/admin/api/v1/policies/fortigate-policy/publish \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"version": 1}'
+```
+
+Un destino sin politica publicada no recibe entregas (spec/08 "politica obligatoria antes de activar destino").
+
+### 14.4 Limites conocidos
+
+Ver "Pendiente conocido: Entrega 2" en [spec/PROJECT-MAP.md](spec/PROJECT-MAP.md): sin cola/workers real (reintentos son manuales via `POST /deliveries/{id}/retry` o automatizacion externa), adapter HTTP push sin validar contra un destino real, `credential_ref` solo resuelve `env://` (sin secret manager todavia), rate limit en memoria del proceso.

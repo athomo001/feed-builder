@@ -1,0 +1,8 @@
+# Dependencias de runtime del Hub (spec/09-ROADMAP-ACCEPTANCE.md), separadas
+# del script legado (requirements.txt en la raiz) desde que Entrega 2
+# introduce el Admin API -- exactamente lo que anticipaba el comentario en
+# requirements-dev.txt de la raiz.
+requests==2.32.3
+pydantic>=2
+fastapi>=0.115
+uvicorn>=0.30

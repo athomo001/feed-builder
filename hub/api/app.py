@@ -1,0 +1,125 @@
+"""Admin API (spec/03-ARCHITECTURE.md "Admin API": "servicio separado del
+consumidor OpenCTI. Expone OpenAPI 3.1..."; spec/09 Entrega 2
+"FastAPI/OpenAPI"). `create_app(config)` construye una instancia aislada
+(estado propio en `app.state.hub`) para que tests puedan levantar varias
+apps independientes contra distintos `state_dir` de prueba.
+"""
+import os
+import time
+import uuid
+from collections import defaultdict, deque
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from hub import __version__
+from hub.api.deps import APIState
+from hub.api.errors import api_error_handler, APIError, http_exception_handler, validation_exception_handler
+from hub.api.idempotency_store import init_db as init_idempotency_db
+from hub.api.routers import deliveries, destinations, feeds, health, policies
+from hub.api.token_store import init_db as init_tokens_db
+from hub.config import HubConfig
+from hub.destinations_store import init_db as init_destinations_db
+from hub.errors import ProblemDetail
+from hub.graphql_client import GraphQLClient
+from hub.ledger import init_db as init_ledger_db
+from hub.policy_store import init_db as init_policies_db
+
+
+class _InMemoryRateLimiter:
+    """spec/08 'Rate limit por usuario/IP, expuesto... con RateLimit/
+    RateLimit-Policy'. Placeholder de MVP: en memoria del proceso, no
+    sobrevive un restart ni escala a mas de un worker -- Redis real queda
+    para cuando exista (spec/03 'Persistencia': Redis nunca es la unica
+    fuente de verdad, pero tampoco existe todavia en Entrega 2)."""
+
+    def __init__(self, *, limit: int = 120, window_seconds: int = 60):
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self._hits: dict = defaultdict(deque)
+
+    def check(self, key: str, *, now: float = None) -> tuple[bool, int]:
+        now = now if now is not None else time.time()
+        hits = self._hits[key]
+        while hits and now - hits[0] > self.window_seconds:
+            hits.popleft()
+        if len(hits) >= self.limit:
+            return False, 0
+        hits.append(now)
+        return True, self.limit - len(hits)
+
+
+def create_app(config: HubConfig) -> FastAPI:
+    app = FastAPI(
+        title="OpenCTI IOC Distribution Hub - Admin API",
+        version=__version__,
+        openapi_url="/admin/api/v1/openapi.json",
+        docs_url="/admin/api/v1/docs",
+    )
+
+    os.makedirs(config.state_dir, exist_ok=True)
+    app.state.hub = APIState(
+        config=config,
+        destinations_conn=init_destinations_db(os.path.join(config.state_dir, "destinations.sqlite3")),
+        policies_conn=init_policies_db(os.path.join(config.state_dir, "policies.sqlite3")),
+        ledger_conn=init_ledger_db(os.path.join(config.state_dir, "ledger.sqlite3")),
+        tokens_conn=init_tokens_db(os.path.join(config.state_dir, "tokens.sqlite3")),
+        idempotency_conn=init_idempotency_db(os.path.join(config.state_dir, "idempotency.sqlite3")),
+        graphql_client=GraphQLClient(config.opencti_url, config.opencti_token, verify=config.verify),
+    )
+    app.state.rate_limiter = _InMemoryRateLimiter()
+
+    app.add_exception_handler(APIError, api_error_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
+
+    # spec/08 "CORS cerrado a origen de UI": sin UI todavia (Entrega 3),
+    # cerrado por defecto -- ningun origen de navegador permitido.
+    app.add_middleware(CORSMiddleware, allow_origins=[], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+
+    @app.middleware("http")
+    async def _correlation_and_security(request: Request, call_next):
+        cid = request.headers.get("X-Correlation-Id") or str(uuid.uuid4())
+        request.state.correlation_id = cid
+
+        actor_key = request.headers.get("Authorization") or (request.client.host if request.client else "anon")
+        allowed, remaining = app.state.rate_limiter.check(actor_key)
+        if not allowed:
+            problem = ProblemDetail(
+                type="https://hub.local/problems/rate_limited",
+                title="Too Many Requests",
+                status=429,
+                detail="rate limit exceeded",
+                instance=str(request.url.path),
+                error_code="rate_limited",
+                correlation_id=cid,
+            )
+            return JSONResponse(
+                status_code=429,
+                content=problem.model_dump(exclude_none=True),
+                media_type="application/problem+json",
+                headers={
+                    "X-Correlation-Id": cid,
+                    "RateLimit": f"limit={app.state.rate_limiter.limit}, remaining=0",
+                    "RateLimit-Policy": f"{app.state.rate_limiter.limit};w={app.state.rate_limiter.window_seconds}",
+                },
+            )
+
+        response = await call_next(request)
+        response.headers["X-Correlation-Id"] = cid
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["RateLimit"] = f"limit={app.state.rate_limiter.limit}, remaining={remaining}"
+        response.headers["RateLimit-Policy"] = f"{app.state.rate_limiter.limit};w={app.state.rate_limiter.window_seconds}"
+        return response
+
+    app.include_router(health.router)
+    app.include_router(destinations.router)
+    app.include_router(policies.router)
+    app.include_router(deliveries.router)
+    app.include_router(feeds.router)
+
+    return app

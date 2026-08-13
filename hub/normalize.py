@@ -166,6 +166,7 @@ def normalize_stix_indicator(envelope: dict, *, event_id: str, source_id: str) -
         score=score if score is not None else 0,
         confidence=confidence if confidence is not None else 0,
         detection=bool(detection),
+        revoked=bool(stix.get("revoked", False)),
         markings=markings,
         labels=labels,
         created_at=_to_datetime(stix.get("created")),

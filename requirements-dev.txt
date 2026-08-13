@@ -1,7 +1,7 @@
 -r requirements.txt
 pytest>=8
-pydantic>=2
+-r hub/requirements-dev.txt
 
-# pydantic aqui es la dependencia real de hub/ (Entrega 0: contratos).
-# Cuando la Entrega 2 introduzca el Admin API (FastAPI), hub/ debe pasar a
-# tener su propio archivo de dependencias/paquete, separado del script legado.
+# hub/ tiene su propio archivo de dependencias (hub/requirements.txt,
+# hub/requirements-dev.txt) desde que Entrega 2 introdujo el Admin API
+# (FastAPI/uvicorn/httpx), separado del script legado de arriba.

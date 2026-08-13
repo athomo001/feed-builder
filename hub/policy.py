@@ -39,6 +39,10 @@ class ReasonCode(str, Enum):
     # spec/04 "Capacidad y throughput por destino"
     SKIPPED_CAPACITY = "skipped_capacity"
 
+    # spec/06 "DLQ": descartar con motivo obligatorio, distinto de un rechazo
+    # de politica -- lo decide un operador, no el motor.
+    DISCARDED = "discarded"
+
 
 class PolicyDecision(BaseModel):
     outcome: PolicyOutcome

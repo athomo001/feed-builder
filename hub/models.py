@@ -63,6 +63,7 @@ class CanonicalIOCEvent(BaseModel):
     score: int = Field(ge=0, le=100)
     confidence: int = Field(ge=0, le=100)
     detection: bool = False
+    revoked: bool = False
     markings: list[str] = Field(default_factory=list)
     labels: list[str] = Field(default_factory=list)
     created_at: datetime

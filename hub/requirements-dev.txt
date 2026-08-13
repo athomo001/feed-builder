@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8
+httpx>=0.27
+# httpx: usado por fastapi.testclient.TestClient para los tests de hub/api/.

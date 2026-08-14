@@ -1,8 +1,9 @@
-"""spec/08-API-SECURITY.md `GET /events`, `GET /events/{event_id}`; spec/07
-"Buscador por event_id, stix_id, delivery_id, destino, fuente o fecha" --
-acotado a las columnas que el ledger ya guarda, sin Canonical Event Store
-(family/subtype/valor por evento; ver limite documentado en
-spec/PROJECT-MAP.md).
+"""Buscador de eventos y su historial de entregas. Esta acotado a las
+columnas que el event ledger ya guarda (event_id, stix_id, destino, estado,
+fecha): no hay un Canonical Event Store separado, asi que no se puede
+buscar todavia por family/subtype/valor del IOC.
+
+Autor: Athan Espinoza
 """
 from datetime import datetime
 from typing import Optional
@@ -46,4 +47,7 @@ def search(
 
 @router.get("/{event_id}")
 def timeline(event_id: str, state: APIState = Depends(get_state), _token=Depends(require_role("viewer"))):
+    # Un mismo evento puede tener una entrega por destino/policy_version: el
+    # timeline devuelve todas para poder ver de un vistazo a que destinos
+    # llego, cuales fallaron y cuales quedaron pendientes.
     return [e.model_dump(mode="json") for e in list_deliveries_for_event(state.ledger_conn, event_id)]

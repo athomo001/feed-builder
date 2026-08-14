@@ -1,7 +1,6 @@
-"""Normalizador STIX -> CanonicalIOCEvent (Entrega 1: spec/02-OPENCTI-COMPATIBILITY.md
-"Flujo de entrada" y spec/04-IOC-MODEL-POLICIES.md "Catalogo de IOC").
+"""Normalizador STIX -> CanonicalIOCEvent.
 
-Orden de clasificacion exigido por spec/04:
+Orden de clasificacion, de mas confiable a menos confiable:
 1. El objeto STIX/observable y su campo explicito (main_observable_type).
 2. pattern_type y el patron STIX validado (regex sobre hashes.'ALGO' = '...').
 3. Un mapeo de adaptador documentado (STIX_OBSERVABLE_TYPE_TO_FAMILY_SUBTYPE).
@@ -10,8 +9,10 @@ Orden de clasificacion exigido por spec/04:
 
 Cobertura actual: hash (via pattern STIX) y los observable_type de red/web/
 identidad mapeados explicitamente abajo. Cualquier otro tipo se rechaza con
-UnclassifiedIndicatorError en vez de adivinar (spec/04 "Un IOC sin subtipo
-confiable queda en unclassified").
+UnclassifiedIndicatorError en vez de adivinar: un IOC sin subtipo confiable
+queda sin clasificar en vez de propagarse con un subtipo inventado.
+
+Autor: Athan Espinoza
 """
 import re
 from datetime import datetime, timezone
@@ -61,6 +62,9 @@ _HASH_PATTERN_RE = re.compile(r"hashes\.'?([A-Za-z0-9_-]+)'?\s*=\s*'([^']+)'", r
 
 
 def _first_extension(stix: dict) -> dict:
+    # El objeto STIX puede traer varias extensiones registradas bajo IDs
+    # distintos; solo interesa la primera con forma de dict (la extension de
+    # OpenCTI), asi que se evita acoplar el codigo a un ID de extension fijo.
     exts = stix.get("extensions") or {}
     for value in exts.values():
         if isinstance(value, dict):
@@ -81,6 +85,9 @@ def classify_stix(stix: dict):
     ext = _first_extension(stix)
     main_type = ext.get("main_observable_type")
 
+    # StixFile se trata aparte porque "hash" no es un observable_type propio:
+    # el algoritmo concreto (md5, sha256, ...) viene codificado en el patron
+    # STIX, no en main_observable_type, asi que necesita su propia logica.
     if main_type == "StixFile":
         m = _HASH_PATTERN_RE.search(stix.get("pattern") or "")
         if m:
@@ -92,8 +99,10 @@ def classify_stix(stix: dict):
         if value:
             subtype = HASH_LENGTH_TO_SUBTYPE.get(len(value))
             if subtype:
-                # spec/04: "no se deduce solo por longitud" como via principal;
-                # esto es el ultimo recurso, por eso la confianza baja.
+                # Inferir el algoritmo solo por la longitud del valor es
+                # ambiguo (varios algoritmos comparten longitud de digest);
+                # por eso es el ultimo recurso y va con confianza reducida
+                # en vez de 1.0, para que una politica estricta pueda excluirlo.
                 return Family.HASH, subtype, value, 0.6
         raise UnclassifiedIndicatorError("StixFile sin algoritmo de hash reconocible")
 
@@ -108,6 +117,10 @@ def classify_stix(stix: dict):
 
 
 def _extract_stix(envelope: dict) -> dict:
+    # El envelope llega con formas distintas segun la fuente (Live Stream
+    # anida el objeto en data.data; el adaptador de GraphQL, en cambio, puede
+    # entregarlo mas plano, o incluso pasar el objeto STIX directo en tests).
+    # Se prueban las variantes conocidas en orden en vez de asumir una sola.
     data = envelope.get("data")
     if isinstance(data, dict):
         inner = data.get("data")
@@ -121,6 +134,10 @@ def _extract_stix(envelope: dict) -> dict:
 
 
 def _split_labels_and_markings(labels: list[str]):
+    # OpenCTI representa los marcados TLP como labels con prefijo "tlp:" en
+    # vez de como un campo de marking dedicado en este flujo; se separan aqui
+    # para que el resto del sistema trate markings y labels como conceptos
+    # distintos, tal como los expone CanonicalIOCEvent.
     markings, remaining_labels = [], []
     for label in labels or []:
         if label.lower().startswith("tlp:"):
@@ -149,6 +166,10 @@ def normalize_stix_indicator(envelope: dict, *, event_id: str, source_id: str) -
 
     markings, labels = _split_labels_and_markings(stix.get("labels") or [])
 
+    # score/confidence/detection pueden faltar en objetos STIX de origenes
+    # externos que no pasan por las extensiones de OpenCTI; se normaliza a
+    # un valor "neutro" (0 / False) en vez de dejar el campo ausente, porque
+    # el modelo canonico los declara como no-opcionales.
     score = ext.get("score")
     confidence = stix.get("confidence")
     detection = ext.get("detection", False)

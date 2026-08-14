@@ -1,7 +1,10 @@
-"""spec/08-API-SECURITY.md `/deliveries/{delivery_id}/retry|discard`, rol
-`operator`. `delivery_id` no es un campo propio del ledger (la clave real
-es `event_id + destination_id + policy_version`, spec/03); se codifica como
-`{event_id}::{destination_id}::{policy_version}` para tener una sola ruta.
+"""Endpoints para reintentar o descartar entregas fallidas, con rol
+`operator`. `delivery_id` no es un campo propio del ledger -- la clave real
+de una entrega es `event_id + destination_id + policy_version` -- asi que
+se codifica como `{event_id}::{destination_id}::{policy_version}` para
+poder direccionar una entrega especifica con una sola ruta.
+
+Autor: Athan Espinoza
 """
 from datetime import datetime, timezone
 
@@ -28,6 +31,9 @@ _SEP = "::"
 
 
 def _parse_delivery_id(delivery_id: str) -> tuple[str, str, int]:
+    # Se valida la forma completa (3 partes, version entera) antes de tocar
+    # el ledger: un delivery_id malformado debe ser 400 del caller, no un
+    # 404/500 confuso mas adelante por buscar con valores basura.
     parts = delivery_id.split(_SEP)
     if len(parts) != 3:
         raise APIError(
@@ -53,6 +59,9 @@ def retry(delivery_id: str, request: Request, state: APIState = Depends(get_stat
     entry = get_delivery(state.ledger_conn, event_id, destination_id, policy_version)
     if entry is None:
         raise APIError(404, "Not Found", f"delivery '{delivery_id}' no existe", error_code="delivery_not_found")
+    # Solo tiene sentido reintentar algo que quedo en un estado de fallo
+    # (retrying/dead-letter); reintentar un DELIVERED o SKIPPED reenviaria un
+    # IOC que ya se entrego (o se descarto a proposito), de ahi el 409.
     if entry.state not in (DeliveryState.RETRYING, DeliveryState.DEAD_LETTER):
         raise APIError(
             409, "Conflict", f"delivery esta en estado '{entry.state.value}', no es reintentable",
@@ -63,6 +72,9 @@ def retry(delivery_id: str, request: Request, state: APIState = Depends(get_stat
     if destination is None:
         raise APIError(404, "Not Found", f"destination '{destination_id}' ya no existe", error_code="destination_not_found")
 
+    # El ledger solo guarda el stix_id, no el contenido del indicador: hay
+    # que volver a consultarlo a OpenCTI para reconstruir el evento a
+    # entregar, ya que pudo cambiar desde el intento original.
     try:
         data = state.graphql_client.query(GET_INDICATOR_QUERY, {"id": entry.stix_id})
     except Exception as e:
@@ -70,6 +82,9 @@ def retry(delivery_id: str, request: Request, state: APIState = Depends(get_stat
 
     node = data.get("indicator")
     if node is None:
+        # El indicador pudo haber sido borrado/despublicado en OpenCTI entre
+        # el fallo original y este reintento; 502 en vez de 404 porque la
+        # falla es de la dependencia externa, no de este request.
         raise APIError(
             502, "Bad Gateway", "OpenCTI no devolvio el indicador para reintentar", error_code="opencti_indicator_missing"
         )
@@ -77,7 +92,17 @@ def retry(delivery_id: str, request: Request, state: APIState = Depends(get_stat
     envelope = indicator_node_to_envelope(node, action="create")
     event = normalize_stix_indicator(envelope, event_id=event_id, source_id=state.config.source_id)
 
-    adapter = build_adapter(destination, txt_feed_dir=state.config.txt_feed_dir, taxii_conn=state.taxii_conn)
+    adapter = build_adapter(
+        destination,
+        txt_feed_dir=state.config.txt_feed_dir,
+        taxii_conn=state.taxii_conn,
+        secrets_conn=state.secrets_conn,
+        cipher=state.secret_cipher,
+    )
+    # El breaker se busca/crea por destination_id y se guarda en el estado
+    # compartido de la app (no por request): asi el estado abierto/cerrado
+    # persiste entre llamadas y refleja la salud real del destino a lo largo
+    # del tiempo, no solo de este reintento puntual.
     breaker = state.circuit_breakers.setdefault(destination_id, CircuitBreaker()) if uses_circuit_breaker(destination) else None
 
     updated = deliver(
@@ -111,6 +136,9 @@ def discard(
     if entry is None:
         raise APIError(404, "Not Found", f"delivery '{delivery_id}' no existe", error_code="delivery_not_found")
 
+    # A diferencia de retry, discard no exige un estado previo especifico:
+    # un operador puede decidir abandonar una entrega en cualquier estado de
+    # fallo, y `reason` (obligatorio) queda auditado como justificacion.
     updated = entry.model_copy(
         update={
             "state": DeliveryState.SKIPPED,

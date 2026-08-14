@@ -1,22 +1,21 @@
-"""Adaptador QRadar Reference Set (spec/09-ROADMAP-ACCEPTANCE.md Entrega 4
-"Integraciones", esfuerzo medio).
+"""Adaptador QRadar Reference Set: empuja IOC via REST API (`bulk_load`),
+JSON sobre `/api/reference_data/sets/{name}/bulk_load`, autenticado con
+token de API de QRadar.
 
-spec/05-FORMATS-DESTINATIONS.md: "IBM QRadar | Reference Set via REST API
-(bulk_load) | JSON sobre /api/reference_data/sets/{name}/bulk_load | El Hub
-empuja (push)... | Token de API de QRadar". `bulk_load` es aditivo (agrega
-valores al set existente, nunca lo reemplaza) -- IBM lo documenta como la
-via eficiente para agregar muchos valores de una vez; llamarlo con una
-lista de un solo valor por evento es seguro (nunca hay riesgo de pisar el
-set), aunque no es el caso de uso mas eficiente para el que existe (ese
-seria un resync/backfill por lotes -- fuera de alcance de esta entrega, no
-hay cola/workers real para acumular un lote antes de enviarlo, spec/03
-"Queue y workers" sigue pendiente).
+`bulk_load` es aditivo (agrega valores al set existente, nunca lo
+reemplaza) -- IBM lo documenta como la via eficiente para agregar muchos
+valores de una vez; llamarlo con una lista de un solo valor por evento es
+seguro (nunca hay riesgo de pisar el set), aunque no es el caso de uso mas
+eficiente para el que existe (ese seria un resync/backfill por lotes,
+acumulando un lote antes de enviarlo -- no implementado todavia).
 
 No se valido este adapter contra una instancia QRadar real (mismo
 disclaimer honesto que ya tiene `HttpPushAdapter` para su propio destino
 generico) -- el nombre del header de auth (`SEC`) y la forma del body (JSON
 array de valores) siguen la documentacion publica de IBM, no un esquema
 introspectado.
+
+Autor: Athan Espinoza
 """
 import requests
 
@@ -25,13 +24,18 @@ from hub.credentials import resolve_credential_ref
 from hub.destinations_store import Destination
 from hub.models import CanonicalIOCEvent
 
+# Version de la QRadar REST API contra la que se probo el shape del
+# request (header Version); fijada como constante para poder actualizarla
+# en un solo lugar si una instalacion necesita otra version de API.
 _QRADAR_API_VERSION = "12.0"
 
 
 class QRadarAdapter:
-    def __init__(self, destination: Destination, *, session=None):
+    def __init__(self, destination: Destination, *, session=None, secrets_conn=None, cipher=None):
         self.destination = destination
         self._session = session or requests
+        self._secrets_conn = secrets_conn
+        self._cipher = cipher
 
     def _set_name(self) -> str:
         return (self.destination.format_options or {}).get("reference_set_name", "")
@@ -53,7 +57,10 @@ class QRadarAdapter:
         return {"value": event.normalized_value, "event_id": event.event_id}
 
     def send(self, rendered: dict, *, idempotency_key: str) -> AdapterSendResult:
-        token = resolve_credential_ref(self.destination.credential_ref)
+        # Token resuelto en cada llamada, nunca cacheado: recoge rotaciones
+        # de credencial sin reiniciar el adapter y evita retener el secreto
+        # en memoria mas alla de lo necesario para esta llamada.
+        token = resolve_credential_ref(self.destination.credential_ref, secrets_conn=self._secrets_conn, cipher=self._cipher)
         url = f"{self.destination.endpoint.rstrip('/')}/api/reference_data/sets/{self._set_name()}/bulk_load"
         headers = {
             "SEC": token,
@@ -73,9 +80,12 @@ class QRadarAdapter:
         return AdapterSendResult(success=True, status_code=resp.status_code)
 
     def discard(self, event: CanonicalIOCEvent) -> AdapterSendResult:
+        # No todo reference set se puede depurar por API en todos los
+        # destinos configurados: si el destino no lo soporta, se reporta
+        # exito sin llamar a la red en vez de forzar un DELETE no deseado.
         if not self.destination.supports_delete:
             return AdapterSendResult(success=True, detail=f"delete_strategy={self.destination.delete_strategy}")
-        token = resolve_credential_ref(self.destination.credential_ref)
+        token = resolve_credential_ref(self.destination.credential_ref, secrets_conn=self._secrets_conn, cipher=self._cipher)
         url = (
             f"{self.destination.endpoint.rstrip('/')}/api/reference_data/sets/"
             f"{self._set_name()}/{event.normalized_value}"
@@ -93,6 +103,9 @@ class QRadarAdapter:
         return None
 
     def healthcheck(self) -> bool:
+        # No hace una llamada de red real (evita gastar cuota/latencia en un
+        # chequeo periodico): solo confirma que la configuracion minima para
+        # poder intentar un send() esta presente.
         return bool(self.destination.endpoint) and bool(self._set_name())
 
     def close(self) -> None:

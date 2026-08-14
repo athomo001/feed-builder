@@ -1,16 +1,16 @@
-"""Adaptador Wazuh CDB list (spec/09-ROADMAP-ACCEPTANCE.md Entrega 4
-"Integraciones", esfuerzo medio).
+"""Adaptador Wazuh CDB list.
 
-spec/05-FORMATS-DESTINATIONS.md: "CDB list (constant database) referenciada
-en `ossec.conf`... Texto `clave:valor`... Wazuh **no** hace *poll* a una
-URL: el archivo debe existir en el filesystem del manager y requiere reload
-para tomar el cambio". Decision #11 de spec/09 ("Modelo de entrega hacia
-Wazuh") se fija aca: el Hub **solo materializa el archivo CDB**, igual que
-cualquier otro `file_feed` -- no se construye un agente/sync-companion que
-se conecte al manager de Wazuh (superficie de credenciales/SSH nueva, fuera
-de lo que un Hub de distribucion de IOC deberia hacer). Sincronizar el
-archivo al manager y disparar el reload queda como responsabilidad externa
-al operador/automatizacion de su lado.
+Una CDB list (constant database) es texto plano `clave:valor` referenciada
+en `ossec.conf`. Wazuh **no** hace *poll* a una URL: el archivo debe existir
+en el filesystem del manager y requiere reload para tomar el cambio. Por
+eso el Hub **solo materializa el archivo CDB**, igual que cualquier otro
+`file_feed` -- no se construye un agente/sync-companion que se conecte al
+manager de Wazuh, porque eso abriria una superficie de credenciales/SSH
+nueva que va mas alla de lo que un Hub de distribucion de IOC deberia
+hacer. Sincronizar el archivo al manager y disparar el reload queda como
+responsabilidad externa al operador/automatizacion de su lado.
+
+Autor: Athan Espinoza
 """
 import os
 from typing import Optional
@@ -31,10 +31,13 @@ class WazuhCdbAdapter:
         # format_options usa el subtype como valor en vez de dejarlo vacio,
         # para operadores que quieran distinguir el tipo de IOC en la lista.
         self.include_tag: bool = bool(opts.get("include_tag", False))
+        # Advertencia dejada dentro del propio archivo, no solo en el
+        # docstring del modulo: el operador que abra el .cdb en el manager
+        # necesita ver ahi mismo que sincronizar/reload es tarea suya.
         header = (
             "# Generado por el Hub -- CDB list (clave:valor). Sincronizar al "
             "filesystem del manager de Wazuh y disparar el reload es "
-            "responsabilidad externa (spec/09 Decision #11)."
+            "responsabilidad externa."
         )
         self.registry = FeedWriterRegistry(
             self.base_dir,
@@ -51,6 +54,9 @@ class WazuhCdbAdapter:
         return f"{value}:{tag}"
 
     def _parse_line(self, line: str) -> Optional[str]:
+        # Usado al recargar el archivo .cdb existente en memoria: ignora la
+        # linea de header (empieza con '#') y cualquier linea sin el
+        # separador ':' que no pueda ser una entrada CDB valida.
         if line.startswith("#") or ":" not in line:
             return None
         return line.split(":", 1)[0]
@@ -86,6 +92,8 @@ class WazuhCdbAdapter:
         return None
 
     def healthcheck(self) -> bool:
+        # Prueba de escritura real, no solo un chequeo de ruta: detecta
+        # permisos/disco read-only antes de que un send() real falle.
         try:
             os.makedirs(self.base_dir, exist_ok=True)
             probe = os.path.join(self.base_dir, ".healthcheck")

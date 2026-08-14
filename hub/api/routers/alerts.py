@@ -1,9 +1,11 @@
-"""spec/09-ROADMAP-ACCEPTANCE.md Entrega 4 "Alertas email/webhook";
-spec/06-OBSERVABILITY.md seccion 5. Sin scheduler real (spec/03 "Queue y
-workers" sigue pendiente): `POST /alerts/evaluate` se dispara manual o por
-cron externo, mismo patron ya usado para `POST /deliveries/{id}/retry`.
-`hub/service.py` ademas llama las reglas que dependen de estado in-process
-(OpenCTI/cursor) una vez por iteracion de su propio loop.
+"""Evaluacion y notificacion de alertas (email/webhook) sobre el estado de
+ingesta, entregas y feeds. Sin un scheduler/worker real todavia, por lo que
+`POST /alerts/evaluate` se dispara manual o por cron externo -- mismo
+patron ya usado para `POST /deliveries/{id}/retry`. `hub/service.py`
+ademas llama las reglas que dependen de estado in-process (OpenCTI/cursor)
+una vez por iteracion de su propio loop.
+
+Autor: Athan Espinoza
 """
 import os
 import time
@@ -55,6 +57,9 @@ def _feed_ages_seconds(state: APIState) -> dict:
         if not os.path.isdir(feed_dir):
             continue
         for name in os.listdir(feed_dir):
+            # Se ignoran archivos ocultos y temporales (".tmp" en escritura
+            # atomica): usar su mtime daria una edad falsa, ya sea de un
+            # archivo de control ajeno o de un feed a medio escribir.
             if name.startswith(".") or name.endswith(".tmp"):
                 continue
             path = os.path.join(feed_dir, name)
@@ -78,6 +83,9 @@ def _last_success_seconds_ago(state: APIState) -> dict:
 
 
 def _evaluate_candidates(state: APIState) -> list:
+    # Punto unico donde se corren todas las reglas de hub/alert_rules.py:
+    # tanto el endpoint HTTP como el loop periodico de hub/service.py llaman
+    # esta misma funcion para que ambos caminos evaluen exactamente igual.
     heartbeat_age = heartbeat_age_seconds(_heartbeat_path(state.config))
     cursor = load_cursor(state.cursor_conn, state.config.source_id)
     cursor_age = (datetime.now(timezone.utc) - cursor.updated_at).total_seconds() if cursor else None
@@ -102,6 +110,10 @@ def evaluate_and_notify(state: APIState) -> list:
     conn = state.alerts_conn
     candidates = _evaluate_candidates(state)
 
+    # Se arranca con TODAS las condiciones conocidas (no solo las que tienen
+    # candidatos esta corrida): ver el comentario de _KNOWN_CONDITIONS mas
+    # arriba -- si no, una condicion que se vacio del todo nunca entraria al
+    # loop de resolucion de abajo y quedaria firing para siempre.
     by_condition: dict = {key: [] for key in _KNOWN_CONDITIONS}
     for candidate in candidates:
         by_condition.setdefault((candidate.condition, candidate.component), []).append(candidate)
@@ -119,11 +131,15 @@ def evaluate_and_notify(state: APIState) -> list:
                 observed_value=candidate.observed_value,
             )
             active_alerts.append(alert)
+        # Cualquier alerta que estaba firing para esta (condition, component)
+        # pero cuyo resource_id ya no aparece entre los candidatos actuales
+        # significa que la condicion dejo de cumplirse para ese recurso.
         for existing in list_alerts(conn, condition=condition, component=component, state="firing"):
             if existing.resource_id not in active_resource_ids:
                 resolve_alert(conn, existing.alert_id)
 
-    notify_alerts(conn, active_alerts, build_channels(state.config), cooldown_seconds=state.config.alert_cooldown_seconds)
+    channels = build_channels(state.config, secrets_conn=state.secrets_conn, cipher=state.secret_cipher)
+    notify_alerts(conn, active_alerts, channels, cooldown_seconds=state.config.alert_cooldown_seconds)
     return active_alerts
 
 

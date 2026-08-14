@@ -1,10 +1,8 @@
-"""Persistencia de alertas (spec/09-ROADMAP-ACCEPTANCE.md Entrega 4
-"Integraciones", "Alertas email/webhook"; spec/06-OBSERVABILITY.md seccion
-5: "Cada alerta debe contener: alert_id, severidad, estado y timestamps;
-componente afectado y destino/fuente; condicion que la activo y valor
-observado... Las alertas deben evitar duplicacion mediante una clave
-estable y usar cooldown para no inundar al operador"). SQLite, mismo estilo
-que `hub/api/audit_store.py`.
+"""Persistencia de alertas: cada alerta guarda su severidad, estado y
+timestamps, el componente/recurso afectado, y la condicion que la activo
+con su valor observado. Las alertas deben evitar duplicacion mediante una
+clave estable y usar cooldown para no inundar al operador. SQLite, mismo
+estilo que `hub/api/audit_store.py`.
 
 Clave de dedup estable = `(condition, component, resource_id)`, codificada
 directo como `alert_id` (evita una tabla de lookup aparte): una alerta que
@@ -12,6 +10,8 @@ sigue firing solo actualiza `last_seen_at`/`observed_value`, nunca duplica
 fila. Si la condicion deja de cumplirse, `resolve_alert` la cierra; una
 condicion que vuelve a dispararse despues de resuelta abre un ciclo nuevo
 (`first_seen_at` se reinicia).
+
+Autor: Athan Espinoza
 """
 import sqlite3
 from datetime import datetime, timezone
@@ -62,6 +62,9 @@ def init_db(path: str) -> sqlite3.Connection:
     return conn
 
 
+# Orden canonico de columnas de `alerts`, compartido por cada INSERT/SELECT
+# de este modulo para que el INSERT posicional y `_row_to_alert` (que lee
+# por indice de tupla) nunca queden desalineados.
 _COLUMNS = (
     "alert_id, condition_name, severity, state, component, resource_id, observed_value, "
     "first_seen_at, last_seen_at, last_notified_at, acknowledged_by, acknowledged_at"
@@ -133,11 +136,18 @@ def upsert_alert(
     now: Optional[datetime] = None,
 ) -> Alert:
     now = now or datetime.now(timezone.utc)
+    # alert_id = clave de dedup codificada directo (ver docstring del
+    # modulo): mismo condition+component+resource_id siempre mapea al mismo
+    # id, sin necesitar una tabla de lookup para encontrar la alerta previa.
     alert_id = f"{condition}:{component}:{resource_id}"
     existing = get_alert(conn, alert_id)
     if existing is not None and existing.state != "resolved":
+        # Sigue firing: se actualiza la fila existente en vez de crear una
+        # nueva, para no duplicar alertas por la misma condicion.
         updated = existing.model_copy(update={"severity": severity, "observed_value": observed_value, "last_seen_at": now})
     else:
+        # No existe, o existe pero ya estaba resuelta: es un ciclo nuevo,
+        # por eso first_seen_at se reinicia en vez de heredar el de antes.
         updated = Alert(
             alert_id=alert_id,
             condition=condition,

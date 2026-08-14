@@ -1,8 +1,11 @@
-"""spec/07-ADMIN-UI-ANGULAR.md "OpenCTI / Ingesta": pausar/reanudar
-(`operator`), iniciar reconciliacion (`operator`), rebobinar cursor
-(`security-admin`, motivo obligatorio). Escribe pedidos en
-`hub/ingestion_control.py`; el proceso `hub.service` los aplica en su
-propio loop (son procesos separados, ver ese modulo para el porque).
+"""Control de la ingesta desde OpenCTI: pausar/reanudar y reconciliar
+requieren rol `operator`; rebobinar el cursor requiere `security-admin` y
+un motivo obligatorio porque puede provocar reprocesar/reenviar IOCs ya
+entregados. Este router solo escribe pedidos en `hub/ingestion_control.py`;
+el proceso `hub.service` los aplica en su propio loop, ya que la API y la
+ingesta corren en procesos separados (ver ese modulo para el porque).
+
+Autor: Athan Espinoza
 """
 from fastapi import APIRouter, Depends, Request
 
@@ -69,8 +72,9 @@ def rewind(
     state: APIState = Depends(get_state),
     token=Depends(require_role("security-admin")),
 ):
-    # spec/07: "Se crea un checkpoint antes de rebobinar" -- el checkpoint es
-    # la propia entrada de auditoria con el cursor actual como `before`.
+    # No se crea un checkpoint separado: la propia entrada de auditoria, con
+    # el cursor actual como `before`, ya cumple ese rol y permite reconstruir
+    # a donde apuntaba el cursor antes del rebobinado si hace falta revertir.
     current = load_cursor(state.cursor_conn, state.config.source_id)
     control = request_rewind(
         state.ingestion_control_conn,

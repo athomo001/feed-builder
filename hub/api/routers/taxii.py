@@ -1,23 +1,22 @@
-"""Servidor TAXII 2.1 minimo, de solo lectura (spec/09-ROADMAP-ACCEPTANCE.md
-Entrega 4 "Integraciones", alto esfuerzo: "Cisco Threat Intelligence
-Director via TAXII"). Decision de esta entrega: el Hub construye su propio
-servidor TAXII en vez de depender solo del TAXII nativo de OpenCTI (spec/02
-lo prefiere para consumo directo de OpenCTI por un tercero, pero aca Cisco
-TID necesita apuntar al Hub -- es el Hub quien aplica politicas/filtrado por
-destino antes de exponer el IOC, no OpenCTI directamente).
+"""Servidor TAXII 2.1 minimo, de solo lectura. El Hub construye su propio
+servidor TAXII en vez de depender solo del TAXII nativo de OpenCTI porque
+un consumidor externo (por ejemplo Cisco Threat Intelligence Director)
+necesita apuntar al Hub, no a OpenCTI directamente: es el Hub quien aplica
+politicas y filtrado por destino antes de exponer el IOC.
 
 Un solo API Root (`hub`); una coleccion por destino con `adapter=taxii2`
 (id de coleccion = `destination_id`). Solo lectura -- el Hub es productor,
 nunca acepta STIX entrante por TAXII (`POST .../objects/` devuelve 405).
 
-Auth: HTTP Basic contra el `credential_ref` del propio destino (spec/05
-"escalera de autenticacion cuando el fabricante hace poll": Basic Auth es la
-primera opcion cuando el consumidor lo soporta). El secreto resuelto via
-`credential_ref` sigue la convencion `usuario:password` (mismo `env://` de
-siempre, spec/08 "el secreto se referencia por credential_ref, nunca en
-claro"). Discovery/api-root/listado de colecciones quedan sin autenticar
--- solo exponen metadata (titulos), nunca valores de IOC; el gate real esta
-en los dos endpoints que devuelven objetos.
+Auth: HTTP Basic contra el `credential_ref` del propio destino, ya que es
+la opcion mas simple cuando el consumidor la soporta. El secreto resuelto
+via `credential_ref` sigue la convencion `usuario:password` (mismo esquema
+`env://` que el resto de credenciales del Hub: nunca en claro en la
+configuracion). Discovery/api-root/listado de colecciones quedan sin
+autenticar -- solo exponen metadata (titulos), nunca valores de IOC; el
+gate real esta en los dos endpoints que devuelven objetos.
+
+Autor: Athan Espinoza
 """
 import secrets
 from typing import Optional
@@ -41,6 +40,9 @@ _security = HTTPBasic(auto_error=False)
 
 
 def _require_api_root(api_root: str) -> None:
+    # Un unico API Root soportado ("hub"); esto solo existe para dar un 404
+    # TAXII-correcto si un cliente pide un api_root distinto, en vez de un
+    # 404 generico de FastAPI por ruta no encontrada.
     if api_root != _API_ROOT:
         raise APIError(404, "Not Found", f"api_root '{api_root}' no existe", error_code="api_root_not_found")
 
@@ -48,19 +50,25 @@ def _require_api_root(api_root: str) -> None:
 def _require_collection_auth(
     destination_id: str, state: APIState, credentials: Optional[HTTPBasicCredentials]
 ) -> Destination:
+    # Una coleccion "existe" solo si el destino correspondiente es taxii2 y
+    # esta enabled; un destino de otro tipo, deshabilitado, o inexistente da
+    # el mismo 404 generico para no filtrar cuales destination_id son reales.
     destination = get_destination(state.destinations_conn, destination_id)
     if destination is None or destination.adapter != "taxii2" or not destination.enabled:
         raise APIError(404, "Not Found", f"coleccion '{destination_id}' no existe", error_code="collection_not_found")
     if not destination.credential_ref:
-        # Sin credential_ref: cerrado por defecto, igual que cualquier otro
-        # destino file_feed sin auth explicita (spec/08 "nunca publicar un
-        # feed... sin al menos un control de acceso").
+        # Sin credential_ref: cerrado por defecto. No hay forma segura de
+        # exponer una coleccion sin ningun control de acceso, asi que la
+        # ausencia de configuracion se trata como "no autorizado", nunca
+        # como "abierto a cualquiera".
         raise APIError(401, "Unauthorized", "coleccion sin credencial configurada", error_code="unauthorized")
     try:
-        secret = resolve_credential_ref(destination.credential_ref)
+        secret = resolve_credential_ref(destination.credential_ref, secrets_conn=state.secrets_conn, cipher=state.secret_cipher)
     except CredentialResolutionError as e:
         raise APIError(401, "Unauthorized", f"no se pudo resolver la credencial: {e}", error_code="unauthorized")
     expected_user, _, expected_password = secret.partition(":")
+    # compare_digest en vez de == para no filtrar por timing cuanto del
+    # usuario/password coincide con el valor esperado.
     if (
         credentials is None
         or not secrets.compare_digest(credentials.username, expected_user)
@@ -138,6 +146,10 @@ def list_collection_objects(
 
 @router.post("/{api_root}/collections/{destination_id}/objects/")
 def reject_incoming_objects(api_root: str, destination_id: str):
+    # El spec TAXII 2.1 permite escritura en una coleccion; este servidor la
+    # rechaza siempre con 405 en vez de omitir la ruta, para que un cliente
+    # TAXII que intente escribir reciba un error claro del protocolo en vez
+    # de un 404 ambiguo.
     raise APIError(
         405, "Method Not Allowed",
         "el Hub es productor de esta coleccion; no acepta objetos STIX entrantes por TAXII",

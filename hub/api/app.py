@@ -1,8 +1,9 @@
-"""Admin API (spec/03-ARCHITECTURE.md "Admin API": "servicio separado del
-consumidor OpenCTI. Expone OpenAPI 3.1..."; spec/09 Entrega 2
-"FastAPI/OpenAPI"). `create_app(config)` construye una instancia aislada
-(estado propio en `app.state.hub`) para que tests puedan levantar varias
-apps independientes contra distintos `state_dir` de prueba.
+"""Admin API: servicio separado del consumidor de eventos de OpenCTI, expone
+OpenAPI 3.1. `create_app(config)` construye una instancia aislada (estado
+propio en `app.state.hub`) para que tests puedan levantar varias apps
+independientes contra distintos `state_dir` de prueba.
+
+Autor: Athan Espinoza
 """
 import os
 import time
@@ -20,7 +21,7 @@ from hub.api.audit_store import init_db as init_audit_db
 from hub.api.deps import APIState
 from hub.api.errors import api_error_handler, APIError, http_exception_handler, validation_exception_handler
 from hub.api.idempotency_store import init_db as init_idempotency_db
-from hub.api.routers import alerts, audit, deliveries, destinations, events, feeds, health, ingestion, policies, taxii
+from hub.api.routers import alerts, audit, deliveries, destinations, events, feeds, health, ingestion, oidc_auth, policies, secrets, taxii
 from hub.api.token_store import init_db as init_tokens_db
 from hub.config import HubConfig
 from hub.cursor_store import init_db as init_cursor_db
@@ -31,15 +32,19 @@ from hub.alerting_store import init_db as init_alerts_db
 from hub.ingestion_control import init_db as init_ingestion_control_db
 from hub.ledger import init_db as init_ledger_db
 from hub.policy_store import init_db as init_policies_db
+from hub.oidc_session_store import init_db as init_oidc_sessions_db
+from hub.secret_encryption import load_cipher
+from hub.secrets_store import init_db as init_secrets_db
 from hub.taxii_store import init_db as init_taxii_db
+from hub.tracing import configure_tracing
 
 
 class _InMemoryRateLimiter:
-    """spec/08 'Rate limit por usuario/IP, expuesto... con RateLimit/
-    RateLimit-Policy'. Placeholder de MVP: en memoria del proceso, no
-    sobrevive un restart ni escala a mas de un worker -- Redis real queda
-    para cuando exista (spec/03 'Persistencia': Redis nunca es la unica
-    fuente de verdad, pero tampoco existe todavia en Entrega 2)."""
+    """Rate limit por usuario/IP, expuesto via encabezados RateLimit/
+    RateLimit-Policy. Implementacion de MVP: vive en memoria del proceso, no
+    sobrevive un restart ni escala a mas de un worker; un backend
+    compartido (por ejemplo Redis) queda pendiente para cuando el
+    despliegue lo requiera."""
 
     def __init__(self, *, limit: int = 120, window_seconds: int = 60):
         self.limit = limit
@@ -58,6 +63,7 @@ class _InMemoryRateLimiter:
 
 
 def create_app(config: HubConfig) -> FastAPI:
+    configure_tracing(config)
     app = FastAPI(
         title="OpenCTI IOC Distribution Hub - Admin API",
         version=__version__,
@@ -66,6 +72,9 @@ def create_app(config: HubConfig) -> FastAPI:
     )
 
     os.makedirs(config.state_dir, exist_ok=True)
+    # Una base sqlite por dominio (destinos, politicas, ledger, tokens...) en
+    # vez de una unica base compartida: aisla el estado de cada area y hace
+    # mas facil resetear/inspeccionar una sola parte sin tocar el resto.
     app.state.hub = APIState(
         config=config,
         destinations_conn=init_destinations_db(os.path.join(config.state_dir, "destinations.sqlite3")),
@@ -78,30 +87,43 @@ def create_app(config: HubConfig) -> FastAPI:
         cursor_conn=init_cursor_db(os.path.join(config.state_dir, "cursor.sqlite3")),
         taxii_conn=init_taxii_db(os.path.join(config.state_dir, "taxii.sqlite3")),
         alerts_conn=init_alerts_db(os.path.join(config.state_dir, "alerts.sqlite3")),
+        secrets_conn=init_secrets_db(os.path.join(config.state_dir, "secrets.sqlite3")),
+        secret_cipher=load_cipher(config),
+        oidc_sessions_conn=init_oidc_sessions_db(os.path.join(config.state_dir, "oidc_sessions.sqlite3")),
         graphql_client=GraphQLClient(config.opencti_url, config.opencti_token, verify=config.verify),
     )
     app.state.rate_limiter = _InMemoryRateLimiter()
 
+    # Normaliza toda respuesta de error (interna, HTTP generica, o de
+    # validacion de payload) al mismo formato Problem Details.
     app.add_exception_handler(APIError, api_error_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
-    # spec/08 "CORS cerrado a origen de UI": cerrado por defecto (lista
-    # vacia si ADMIN_UI_ORIGINS no esta seteado), habilitado solo al origen
-    # real de la UI Angular cuando se configura (ver README.md 15).
+    # CORS cerrado por defecto (lista vacia si ADMIN_UI_ORIGINS no esta
+    # seteado), habilitado solo al origen real de la UI Angular cuando se
+    # configura. `allow_credentials=True` porque la cookie de sesion OIDC
+    # (`hub_session`) necesita CORS credenciado -- por eso `admin_ui_origins`
+    # nunca puede ser wildcard (los navegadores rechazan `*` + credentials).
     app.add_middleware(
         CORSMiddleware,
         allow_origins=config.admin_ui_origins,
-        allow_credentials=False,
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
     @app.middleware("http")
     async def _correlation_and_security(request: Request, call_next):
+        # Se respeta un X-Correlation-Id entrante (para trazar una cadena de
+        # llamadas entre servicios) y se genera uno nuevo si el cliente no
+        # manda ninguno.
         cid = request.headers.get("X-Correlation-Id") or str(uuid.uuid4())
         request.state.correlation_id = cid
 
+        # El rate limit se identifica por token cuando hay Authorization, o
+        # por IP del cliente en caso contrario, para que clientes distintos
+        # sin autenticar no compartan un unico bucket global.
         actor_key = request.headers.get("Authorization") or (request.client.host if request.client else "anon")
         allowed, remaining = app.state.rate_limiter.check(actor_key)
         if not allowed:
@@ -127,6 +149,9 @@ def create_app(config: HubConfig) -> FastAPI:
 
         response = await call_next(request)
         response.headers["X-Correlation-Id"] = cid
+        # Headers de seguridad basicos en toda respuesta: evitan que el
+        # browser adivine el content-type (MIME sniffing) y evitan filtrar
+        # la URL interna via el header Referer hacia un origen externo.
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["RateLimit"] = f"limit={app.state.rate_limiter.limit}, remaining={remaining}"
@@ -143,5 +168,7 @@ def create_app(config: HubConfig) -> FastAPI:
     app.include_router(ingestion.router)
     app.include_router(taxii.router)
     app.include_router(alerts.router)
+    app.include_router(secrets.router)
+    app.include_router(oidc_auth.router)
 
     return app

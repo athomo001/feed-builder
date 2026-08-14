@@ -20,7 +20,11 @@ export const authInterceptor: HttpInterceptorFn = (req, next) => {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  return next(req.clone({ setHeaders: headers })).pipe(
+  // withCredentials: true en toda request -- la sesion OIDC (Entrega 5)
+  // viaja en una cookie HttpOnly, no en memoria; el navegador solo la
+  // adjunta si el request lo pide explicitamente. Inofensivo para el flujo
+  // de token pegado (no hay cookie que enviar en ese caso).
+  return next(req.clone({ setHeaders: headers, withCredentials: true })).pipe(
     catchError((err: unknown) => {
       if (err instanceof HttpErrorResponse) {
         const problem = (err.error ?? null) as ProblemDetail | null;

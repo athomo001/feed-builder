@@ -1,14 +1,16 @@
-"""Simulacion de politica (spec/04-IOC-MODEL-POLICIES.md "Simulacion":
-"Ejecutar muestra historica representativa. Mostrar volumen actual versus
-nuevo. Mostrar ejemplos aceptados, rechazados y expirados. Alertar cambios
-superiores al umbral configurado").
+"""Simulacion de politica: ejecuta una muestra historica representativa y
+compara el volumen resultante (aceptado/rechazado/revocado) entre la
+politica activa y una candidata, con ejemplos concretos y una alerta si el
+cambio supera un umbral configurado.
 
 Dos modos, mismo motor (`hub/policy_engine.evaluate`): si el caller pasa
 `sample_envelopes`, se evalua offline sin red (tests, o un operador
 probando con datos propios). Si no, se trae una muestra acotada de OpenCTI
 reusando `hub/backfill.run_backfill` -- no es un mecanismo de muestreo
-nuevo, es el mismo backfill de Entrega 1 usado de forma no destructiva
-(solo junta envelopes, no los procesa contra el ledger).
+nuevo, es el mismo backfill usado de forma no destructiva (solo junta
+envelopes, no los procesa contra el ledger).
+
+Autor: Athan Espinoza
 """
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -21,6 +23,9 @@ from hub.normalize import UnclassifiedIndicatorError, normalize_stix_indicator
 from hub.policy_engine import evaluate
 from hub.policy_store import PolicyVersion
 
+# Umbral de alerta y limite de ejemplos: valores por defecto pensados para
+# que el reporte destaque cambios significativos sin saturar al operador con
+# el detalle completo de la muestra.
 THRESHOLD_ALERT_PCT = 20.0
 MAX_EXAMPLES = 5
 
@@ -35,6 +40,9 @@ class _Tally:
 
 def _tally(events: list[CanonicalIOCEvent], policy: Optional[PolicyVersion], *, now: datetime) -> _Tally:
     tally = _Tally()
+    # Sin politica activa (ej. primera publicacion de un destino) no hay un
+    # "before" real con que comparar; se devuelve un tally vacio en vez de
+    # fallar, para que la comparacion siga siendo posible.
     if policy is None:
         return tally
     for event in events:
@@ -79,6 +87,9 @@ def simulate(
 ) -> dict:
     now = now or datetime.now(timezone.utc)
 
+    # Modo offline (sample_envelopes explicito) vs modo en vivo (se trae una
+    # muestra reciente de OpenCTI): el mismo `_tally`/`evaluate` de abajo se
+    # usa en ambos, solo cambia de donde salen los eventos a evaluar.
     if sample_envelopes is not None:
         events = _envelopes_to_events(sample_envelopes)
     else:
@@ -98,6 +109,8 @@ def simulate(
     after = _tally(events, candidate, now=now)
 
     delta_pct = None
+    # Guard contra division por cero: si la politica activa no acepto nada en
+    # la muestra, un "% de cambio" no tiene una base valida para calcularse.
     if before.accepted > 0:
         delta_pct = round((after.accepted - before.accepted) / before.accepted * 100, 1)
 

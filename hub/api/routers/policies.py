@@ -1,6 +1,9 @@
-"""spec/08-API-SECURITY.md endpoints de `/policies`; rol `policy-admin`
-("crear, simular y publicar politicas") para toda escritura, `viewer` para
-lectura.
+"""Endpoints de gestion de politicas de distribucion: crear, simular,
+publicar y revertir versiones. Toda escritura requiere rol `policy-admin`,
+ya que una politica mal publicada puede exponer o bloquear IOCs hacia un
+destino entero; la lectura solo requiere `viewer`.
+
+Autor: Athan Espinoza
 """
 from typing import Optional
 
@@ -57,6 +60,9 @@ def create(
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     token=Depends(require_role("policy-admin")),
 ):
+    # El efecto mutante se envuelve en un closure (`compute`) para que
+    # `with_idempotency` pueda decidir SI ejecutarlo (clave nueva) o
+    # devolver la respuesta cacheada de un reintento sin correrlo de nuevo.
     def compute():
         if get_destination(state.destinations_conn, payload.destination_id) is None:
             raise APIError(
@@ -93,9 +99,15 @@ def simulate(
     versions_list = list_versions(state.policies_conn, policy_id)
     if not versions_list:
         raise APIError(404, "Not Found", f"policy '{policy_id}' no existe", error_code="policy_not_found")
-    candidate = versions_list[-1]  # ultima version creada (tipicamente el draft a evaluar)
+    # Se simula la ultima version creada, no la activa: el flujo normal es
+    # crear un draft y simularlo antes de decidir si publicarlo, asi que la
+    # version mas nueva es la candidata por defecto a evaluar.
+    candidate = versions_list[-1]
     active = get_active_version(state.policies_conn, policy_id)
 
+    # Si el caller no manda una muestra propia, se consulta OpenCTI en vivo
+    # para tener datos reales con los que simular; si manda `sample`, se usa
+    # esa (por ejemplo en tests) y no hace falta el cliente GraphQL.
     report = run_simulation(
         candidate=candidate,
         active=active,

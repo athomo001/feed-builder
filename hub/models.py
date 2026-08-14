@@ -1,10 +1,12 @@
-"""Modelo canonico de evento IOC (spec/04-IOC-MODEL-POLICIES.md, Entrega 0).
+"""Modelo canonico de evento IOC.
 
-Traduccion de nombres de familia: la tabla de spec/04 usa etiquetas en
-espanol para el operador (Hash, Red, Web, Identidad, Contenido,
+Traduccion de nombres de familia: la clasificacion conceptual usa etiquetas
+en espanol para el operador (Hash, Red, Web, Identidad, Contenido,
 Vulnerabilidad, Custom); el codigo usa identificadores en ingles
 (network, identity, content, vulnerability) para mantener el vocabulario
 del codigo consistente en un solo idioma. "hash", "custom" no cambian.
+
+Autor: Athan Espinoza
 """
 from datetime import datetime
 from enum import Enum
@@ -29,9 +31,10 @@ class Family(str, Enum):
     CUSTOM = "custom"
 
 
-# Catalogo inicial de subtipos por familia (spec/04, tabla "Familias y subtipos
-# iniciales"). Es extensible: un nuevo subtipo requiere validador, normalizador,
-# pruebas, documentacion y matriz de destinos compatibles (ver spec/04).
+# Catalogo inicial de subtipos por familia. Es extensible, pero a proposito
+# no es un enum abierto: agregar un subtipo nuevo requiere validador,
+# normalizador, pruebas, documentacion y matriz de destinos compatibles
+# propia, asi que la lista explicita fuerza a no olvidar ninguno de esos pasos.
 FAMILY_SUBTYPES = {
     Family.HASH: {
         "md5", "sha1", "sha224", "sha256", "sha384", "sha512",
@@ -73,6 +76,10 @@ class CanonicalIOCEvent(BaseModel):
 
     @model_validator(mode="after")
     def _subtype_belongs_to_family(self) -> "CanonicalIOCEvent":
+        # Se valida en el momento de construccion (no despues) que el subtipo
+        # declarado realmente pertenezca a la familia, para no propagar
+        # combinaciones invalidas (ej. family=hash, subtype=domain) mas
+        # adelante en el pipeline, donde serian mas dificiles de rastrear.
         allowed = FAMILY_SUBTYPES.get(self.family)
         if allowed is not None and self.subtype not in allowed:
             raise ValueError(

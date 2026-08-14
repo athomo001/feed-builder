@@ -1,19 +1,25 @@
-"""Framer SSE puro (spec/03-ARCHITECTURE.md "Limites": tamano maximo por
-evento SSE, Entrega 1 "Limites SSE, backpressure").
+"""Framer SSE puro: ensambla eventos Server-Sent Events completos a partir
+de lineas crudas, con limites de tamano por linea y por evento para
+contener backpressure ante un productor descontrolado.
 
-Puerto del `sse_size_check` de opencti_feed_builder.py, pero desacoplado de
-`requests`: toma cualquier iterable de lineas crudas (bytes) y entrega
-eventos completos ya ensamblados, para poder probarlo sin red y para poder
-alimentarlo tanto desde un stream real como desde un fixture en tests.
+Reimplementacion del chequeo de tamano de un script legado
+(opencti_feed_builder.py), pero desacoplado de `requests`: toma cualquier
+iterable de lineas crudas (bytes) y entrega eventos completos ya
+ensamblados, para poder probarlo sin red y para poder alimentarlo tanto
+desde un stream real como desde un fixture en tests.
 
-Tambien conserva el campo `id:` de cada evento SSE (RFC-ish, no especifico
-de OpenCTI): es el cursor de recuperacion del Live Stream (spec/02 "Cursor
-durable y recuperacion"; enviarlo de vuelta como `Last-Event-ID` en la
-reconexion es lo que evita reprocesar todo el stream desde el inicio).
+Tambien conserva el campo `id:` de cada evento SSE: es el cursor de
+recuperacion del Live Stream, y enviarlo de vuelta como `Last-Event-ID` en
+la reconexion es lo que evita reprocesar todo el stream desde el inicio.
+
+Autor: Athan Espinoza
 """
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Optional
 
+# Limites de tamano por linea y por evento: contienen a un productor SSE
+# descontrolado o corrupto sin depender solo del servidor remoto para
+# comportarse bien.
 DEFAULT_MAX_LINE_BYTES = 256 * 1024
 DEFAULT_MAX_EVENT_BYTES = 2 * 1024 * 1024
 
@@ -35,6 +41,9 @@ def iter_sse_events(
     Una linea o evento que exceda el limite se descarta entero (nunca se
     entrega un evento parcial), igual que hacia el script legado.
     """
+    # Estado del evento SSE en construccion; se resetea via closure (nonlocal)
+    # cada vez que se cierra un evento, para que un evento oversized no
+    # contamine el siguiente.
     event_parts: list[bytes] = []
     event_id: Optional[str] = None
     event_oversized = False
@@ -48,12 +57,15 @@ def iter_sse_events(
             continue
 
         if raw == b"":
+            # Linea vacia = fin de evento en el protocolo SSE.
             if not event_oversized and event_parts:
                 yield SSEEvent(id=event_id, data=b"\n".join(event_parts))
             _reset()
             continue
 
         if raw.startswith(b":"):
+            # Lineas que empiezan con ':' son comentarios/keep-alive del
+            # protocolo SSE: se ignoran, no forman parte del evento.
             continue
 
         if raw.startswith(b"id:"):

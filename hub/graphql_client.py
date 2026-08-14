@@ -1,11 +1,14 @@
-"""Cliente GraphQL minimo (spec/02-OPENCTI-COMPATIBILITY.md: GraphQL para
-backfill, reconciliacion, validacion y metadatos - nunca como mecanismo
-principal de polling en tiempo real).
+"""Cliente GraphQL minimo. GraphQL se usa para backfill, reconciliacion,
+validacion y metadatos -- nunca como mecanismo principal de polling en
+tiempo real (para eso esta el Live Stream via SSE).
 
-Puerto de `post_graphql`/`extract_nodes` de opencti_feed_builder.py,
-parametrizado con la config propia del Hub (hub/config.py) en vez de leer
-variables de entorno directamente, y con TLS verify/CA cert explicitos
-(spec/02 "Configurar TLS y verificacion de certificado").
+Reimplementacion de `post_graphql`/`extract_nodes` de un script legado
+(opencti_feed_builder.py), parametrizada con la configuracion propia del
+Hub (hub/config.py) en vez de leer variables de entorno directamente, y con
+TLS verify/CA cert explicitos para poder validar contra un CA propio sin
+tener que desactivar la verificacion de certificado.
+
+Autor: Athan Espinoza
 """
 from typing import Optional
 
@@ -37,6 +40,8 @@ class GraphQLClient:
         )
         resp.raise_for_status()
         data = resp.json()
+        # GraphQL puede responder 200 OK con un array "errors" en el body:
+        # ese caso tambien es un fallo y debe propagarse, no solo el status HTTP.
         if isinstance(data, dict) and data.get("errors"):
             raise GraphQLError(f"GraphQL errors: {data.get('errors')}")
         return (data or {}).get("data") or {}

@@ -33,5 +33,10 @@
         {{ checking() ? 'Verificando...' : 'Entrar' }}
       </button>
     </mat-card-actions>
+
+    <mat-card-content>
+      <p class="login__sso-divider">o</p>
+      <a mat-stroked-button color="primary" [href]="ssoLoginUrl" style="width: 100%">Entrar con SSO</a>
+    </mat-card-content>
   </mat-card>
 </div>

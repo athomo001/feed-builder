@@ -1,28 +1,29 @@
-"""Escritura TXT compatible (spec/09-ROADMAP-ACCEPTANCE.md Entrega 1
-"persistencia y escritura TXT"; spec/04-IOC-MODEL-POLICIES.md "Capacidad y
-throughput por destino"; spec/05-FORMATS-DESTINATIONS.md "Texto legacy").
+"""Escritura TXT compatible: un feed por subtipo, orden estable, escritura
+atomica, capacidad configurable.
 
-Esto es la escritura TXT compatible de base (un feed por subtipo, orden
-estable, escritura atomica, capacidad configurable). El adapter completo de
-destino (validate/render/send/acknowledge/healthcheck/close, spec/05) con
-configuracion por destino es Entrega 2 ("Adaptador TXT compatible");
-`FeedWriter` es el bloque que ese adapter va a envolver.
+El adapter completo de destino (validate/render/send/acknowledge/
+healthcheck/close) con configuracion por destino envuelve esta clase;
+`FeedWriter` es el bloque base sobre el que se construye ese adapter.
+
+Autor: Athan Espinoza
 """
 import os
 from dataclasses import dataclass
 from typing import Callable, Literal, Optional
 
+from hub.tracing import span
+
 OverflowStrategy = Literal["newest_first", "highest_score_first", "longest_validity_first"]
 
 # `render_line(value, sort_key, meta) -> str`: por defecto una linea es el
-# valor crudo, ignorando `meta` (compatibilidad exacta con el TXT legacy ya
-# construido en Entrega 1). Entrega 4 reusa esta misma clase para formatos
-# `file_feed` propios (CSV de Check Point, MikroTik `.rsc`, Wazuh CDB)
-# pasando un renderer distinto que sí usa `meta` (subtype/score/confidence/
-# etc.), en vez de triplicar atomic-write/capacidad/overflow/dedup por cada
-# uno. `meta` de un valor releido desde disco siempre es `{}` (no se puede
-# reconstruir desde una linea ya renderizada) hasta que un evento real lo
-# actualice -- mismo razonamiento que el sort_key `-inf` de abajo.
+# valor crudo, ignorando `meta` (compatibilidad exacta con el formato TXT
+# legacy). Otros formatos de archivo (CSV de Check Point, MikroTik `.rsc`,
+# Wazuh CDB) reusan esta misma clase pasando un renderer distinto que si usa
+# `meta` (subtype/score/confidence/etc.), en vez de triplicar la logica de
+# atomic-write/capacidad/overflow/dedup por cada formato. `meta` de un valor
+# releido desde disco siempre es `{}` (no se puede reconstruir desde una
+# linea ya renderizada) hasta que un evento real lo actualice -- mismo
+# razonamiento que el sort_key `-inf` de abajo.
 RenderLine = Callable[[str, float, dict], str]
 
 # `parse_line(line) -> value | None`: inverso de `render_line`, para releer
@@ -61,10 +62,10 @@ class FeedWriter:
         self._parse_line = parse_line or (lambda line: line)
         # value -> (sort_key, meta). Se siembra desde el archivo en disco si
         # ya existe: un FeedWriter es de vida corta (se reconstruye por
-        # evento/request, Entrega 2), asi que el archivo -- no la memoria del
-        # proceso -- es la fuente de verdad entre llamadas. Los valores
-        # recuperados no tienen sort_key/meta originales, quedan al final
-        # bajo "newest_first" hasta que una nueva version los actualice.
+        # evento/request), asi que el archivo -- no la memoria del proceso --
+        # es la fuente de verdad entre llamadas. Los valores recuperados no
+        # tienen sort_key/meta originales, quedan al final bajo
+        # "newest_first" hasta que una nueva version los actualice.
         self._values: dict[str, tuple[float, dict]] = {}
         self._load_existing()
 
@@ -97,29 +98,35 @@ class FeedWriter:
         ]
 
     def rebuild(self, *, header: Optional[str] = None) -> FeedWriteResult:
-        header = header if header is not None else self.header
-        ordered = self._ordered_entries()
-        skipped_capacity = 0
-        if self.max_records and len(ordered) > self.max_records:
-            skipped_capacity = len(ordered) - self.max_records
-            ordered = ordered[: self.max_records]
+        with span("feed.rebuild", feed_path=self.path):
+            header = header if header is not None else self.header
+            ordered = self._ordered_entries()
+            skipped_capacity = 0
+            if self.max_records and len(ordered) > self.max_records:
+                # Los entries ya vienen ordenados por prioridad (sort_key
+                # desc); truncar la cola alcanza sin importar el
+                # overflow_strategy configurado.
+                skipped_capacity = len(ordered) - self.max_records
+                ordered = ordered[: self.max_records]
 
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        tmp_path = self.path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
-            if header:
-                f.write(header.rstrip("\n") + "\n")
-            for value, sort_key, meta in ordered:
-                f.write(self._render_line(value, sort_key, meta) + "\n")
-        os.replace(tmp_path, self.path)
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            tmp_path = self.path + ".tmp"
+            # Escritura a archivo temporal + os.replace: un lector externo
+            # (el destino que sirve este TXT) nunca ve un archivo a medio
+            # escribir.
+            with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
+                if header:
+                    f.write(header.rstrip("\n") + "\n")
+                for value, sort_key, meta in ordered:
+                    f.write(self._render_line(value, sort_key, meta) + "\n")
+            os.replace(tmp_path, self.path)
 
-        return FeedWriteResult(written=len(ordered), skipped_capacity=skipped_capacity)
+            return FeedWriteResult(written=len(ordered), skipped_capacity=skipped_capacity)
 
 
 class FeedWriterRegistry:
-    """Un `FeedWriter` por subtipo (spec/05 'Texto legacy': `md5.txt`,
-    `sha512.txt`, `ip.txt`... nunca mezclar algoritmos/subtipos en un mismo
-    archivo por defecto)."""
+    """Un `FeedWriter` por subtipo (`md5.txt`, `sha512.txt`, `ip.txt`...):
+    nunca mezclar algoritmos/subtipos en un mismo archivo por defecto."""
 
     def __init__(
         self,
@@ -143,6 +150,8 @@ class FeedWriterRegistry:
 
     def get(self, subtype: str) -> FeedWriter:
         if subtype not in self._writers:
+            # Un writer por subtipo, creado on-demand y cacheado: evita abrir
+            # archivos para subtipos que nunca reciben eventos.
             path = os.path.join(self.base_dir, f"{subtype}.{self.extension}")
             self._writers[subtype] = FeedWriter(
                 path,

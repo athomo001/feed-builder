@@ -1,7 +1,9 @@
-"""Errores como `application/problem+json` (spec/08-API-SECURITY.md
-"Formato de errores": RFC 9457, `X-Correlation-Id` en el body de error).
-Reutiliza `hub/errors.ProblemDetail` (contrato ya definido en Entrega 0);
-este modulo es el que lo conecta a FastAPI.
+"""Errores como `application/problem+json` (RFC 9457), con
+`X-Correlation-Id` en el body de error para poder correlacionar logs entre
+cliente y servidor. Reutiliza `hub/errors.ProblemDetail`, que ya define el
+contrato del problem+json; este modulo es el que lo conecta a FastAPI.
+
+Autor: Athan Espinoza
 """
 import uuid
 
@@ -14,6 +16,10 @@ from hub.errors import ProblemDetail
 
 
 class APIError(Exception):
+    """Excepcion generica para que cualquier router pueda levantar un error
+    HTTP con forma de problem+json sin construir el JSONResponse a mano;
+    `api_error_handler` la traduce al formato final."""
+
     def __init__(self, status_code: int, title: str, detail: str, *, error_code: str = None):
         self.status_code = status_code
         self.title = title
@@ -22,10 +28,16 @@ class APIError(Exception):
 
 
 def correlation_id(request: Request) -> str:
+    # Prioridad: si algun middleware ya calculo uno para el request (state),
+    # usarlo; si no, respetar el que mando el cliente; si tampoco vino,
+    # generar uno nuevo para que la respuesta de error siempre tenga uno.
     return getattr(request.state, "correlation_id", None) or request.headers.get("X-Correlation-Id") or str(uuid.uuid4())
 
 
 def _problem_response(request: Request, *, status_code: int, title: str, detail: str, error_code: str = None) -> JSONResponse:
+    # Punto unico donde se arma el JSONResponse problem+json: asi los tres
+    # handlers de abajo (APIError, HTTPException generica, validacion) quedan
+    # como wrappers finos y el formato de error nunca diverge entre ellos.
     cid = correlation_id(request)
     problem = ProblemDetail(
         type=f"https://hub.local/problems/{error_code or 'error'}",
@@ -45,16 +57,21 @@ def _problem_response(request: Request, *, status_code: int, title: str, detail:
 
 
 async def api_error_handler(request: Request, exc: APIError) -> JSONResponse:
+    # Traduce cualquier APIError levantado explicitamente por un router.
     return _problem_response(request, status_code=exc.status_code, title=exc.title, detail=exc.detail, error_code=exc.error_code)
 
 
 async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    # Cubre las HTTPException que no pasan por APIError (por ejemplo las que
+    # levanta el propio Starlette/FastAPI, como 404 de ruta no encontrada),
+    # para que ninguna respuesta de error se escape del formato problem+json.
     return _problem_response(request, status_code=exc.status_code, title=str(exc.detail) or "HTTP error", detail=str(exc.detail))
 
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    # spec/08 API3 (mass assignment): un campo no declarado en el schema
-    # tambien cae aca (pydantic con extra="forbid" lo reporta como error 422).
+    # Un campo no declarado en el schema tambien termina aca: los modelos de
+    # request usan extra="forbid", asi que pydantic lo reporta como un error
+    # de validacion mas (422) en vez de asignarlo silenciosamente.
     return _problem_response(
         request, status_code=422, title="Validation error", detail=str(exc.errors()), error_code="validation_error"
     )

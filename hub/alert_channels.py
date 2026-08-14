@@ -1,10 +1,11 @@
-"""Canales de entrega de alertas (spec/09-ROADMAP-ACCEPTANCE.md Entrega 4
-"Alertas email/webhook"). Email: spec/05-FORMATS-DESTINATIONS.md "Email:
-solo para resumenes, aprobacion, alertas y fallos... nunca como canal
-primario... ni con secretos en el mensaje" -- el cuerpo del correo no lleva
-`credential_ref` resuelto ni ningun secreto, solo los campos propios de la
-alerta. Webhook: firmado con `hub/webhook_signing.py` (mismo HMAC-SHA256
-"Standard Webhooks" que spec/08 exige para webhooks de entrega).
+"""Canales de entrega de alertas: email y webhook. El correo se usa solo
+para notificaciones (nunca como canal primario de datos sensibles) -- el
+cuerpo del mensaje no lleva `credential_ref` resuelto ni ningun secreto,
+solo los campos propios de la alerta. El webhook va firmado con
+`hub/webhook_signing.py` (HMAC-SHA256) para que el receptor pueda verificar
+que el payload no fue alterado ni forjado en transito.
+
+Autor: Athan Espinoza
 """
 import json
 import smtplib
@@ -19,6 +20,9 @@ from hub.webhook_signing import sign
 
 
 class EmailAlertChannel:
+    # `smtp_client`/`secrets_conn`/`cipher` son inyectables para poder probar
+    # el envio y la resolucion de credenciales sin abrir una conexion SMTP ni
+    # una base de secretos real.
     def __init__(
         self,
         *,
@@ -28,6 +32,8 @@ class EmailAlertChannel:
         recipients: list[str],
         credential_ref: Optional[str] = None,
         smtp_client=None,
+        secrets_conn=None,
+        cipher=None,
     ):
         self.host = host
         self.port = port
@@ -35,8 +41,12 @@ class EmailAlertChannel:
         self.recipients = recipients
         self.credential_ref = credential_ref
         self._smtp_client = smtp_client or smtplib.SMTP
+        self._secrets_conn = secrets_conn
+        self._cipher = cipher
 
     def send(self, alert: Alert) -> bool:
+        # El canal es opcional: si no esta configurado (sin host o sin
+        # destinatarios) simplemente no envia nada en vez de fallar.
         if not self.host or not self.recipients:
             return False
         message = EmailMessage()
@@ -53,8 +63,11 @@ class EmailAlertChannel:
             f"Ultima vez: {alert.last_seen_at}\n"
         )
         with self._smtp_client(self.host, self.port) as smtp:
+            # La credencial se resuelve recien aca, dentro del bloque de
+            # envio, para que el secreto nunca llegue a formar parte del
+            # cuerpo del mensaje construido arriba.
             if self.credential_ref:
-                secret = resolve_credential_ref(self.credential_ref)
+                secret = resolve_credential_ref(self.credential_ref, secrets_conn=self._secrets_conn, cipher=self._cipher)
                 username, _, password = secret.partition(":")
                 smtp.login(username, password)
             smtp.send_message(message)
@@ -62,12 +75,16 @@ class EmailAlertChannel:
 
 
 class WebhookAlertChannel:
-    def __init__(self, *, url: str, credential_ref: Optional[str] = None, session=None):
+    def __init__(self, *, url: str, credential_ref: Optional[str] = None, session=None, secrets_conn=None, cipher=None):
         self.url = url
         self.credential_ref = credential_ref
         self._session = session or requests
+        self._secrets_conn = secrets_conn
+        self._cipher = cipher
 
     def send(self, alert: Alert) -> bool:
+        # Igual que el canal de email: sin URL configurada, el canal esta
+        # deshabilitado y no debe intentar la llamada HTTP.
         if not self.url:
             return False
         payload = json.dumps(
@@ -83,7 +100,10 @@ class WebhookAlertChannel:
         ).encode()
         headers = {"Content-Type": "application/json"}
         if self.credential_ref:
-            secret = resolve_credential_ref(self.credential_ref)
+            # Firma opcional: solo se agrega si se configuro una credencial
+            # de firma para este webhook, para no romper receptores que
+            # todavia no validan la firma.
+            secret = resolve_credential_ref(self.credential_ref, secrets_conn=self._secrets_conn, cipher=self._cipher)
             headers.update(sign(payload, secret=secret))
         resp = self._session.post(self.url, data=payload, headers=headers, timeout=10)
         return resp.status_code < 400

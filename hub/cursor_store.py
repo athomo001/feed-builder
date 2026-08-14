@@ -1,9 +1,11 @@
-"""Cursor store durable (spec/03-ARCHITECTURE.md "Ingestion service", Entrega 1).
+"""Cursor store durable.
 
-SQLite: valido para MVP single-node segun spec/03 "Persistencia" (la eleccion
-entre SQLite y PostgreSQL para produccion sigue como decision abierta en
-spec/09, punto 2; esto no la prejuzga, solo implementa el contrato de
-durabilidad con lo que ya esta disponible en la stdlib).
+SQLite: valido para un MVP single-node. La eleccion entre SQLite y
+PostgreSQL para produccion sigue siendo una decision abierta; este modulo
+no la prejuzga, solo implementa el contrato de durabilidad con lo que ya
+esta disponible en la stdlib.
+
+Autor: Athan Espinoza
 """
 import sqlite3
 from datetime import datetime, timezone
@@ -19,6 +21,8 @@ class CursorState(BaseModel):
 
 
 def init_db(path: str) -> sqlite3.Connection:
+    # `source_id` es PRIMARY KEY: cada fuente de ingestion tiene un unico
+    # cursor vigente, no un historial de cursores.
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.execute(
         """
@@ -35,6 +39,8 @@ def init_db(path: str) -> sqlite3.Connection:
 
 def save_cursor(conn: sqlite3.Connection, source_id: str, cursor_value: str, updated_at: Optional[datetime] = None) -> None:
     updated_at = updated_at or datetime.now(timezone.utc)
+    # INSERT ... ON CONFLICT UPDATE en vez de un SELECT-then-UPDATE: evita una
+    # condicion de carrera entre comprobar si la fila existe y escribirla.
     conn.execute(
         """
         INSERT INTO cursor_state (source_id, cursor_value, updated_at)

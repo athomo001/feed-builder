@@ -6,10 +6,10 @@
 *.key
 *.crt
 
-# nginx.conf real trae IP/hostname de la empresa (server_name, rutas de certs);
-# se versiona solo la plantilla generica.
-nginx.conf
-!nginx.conf.example
+# nginx.conf es la plantilla generica del Hub (usa ${PUBLIC_HOST} /
+# ${NGINX_HTTPS_PORT}, resueltos via envsubst al arrancar el contenedor,
+# ver docker-compose.yml) -- no trae IP/hostname reales, se versiona.
+# Los certificados si son locales y no se versionan (ver *.crt/*.key arriba).
 
 # Estado y salidas en runtime del feed-builder legado
 feeds/

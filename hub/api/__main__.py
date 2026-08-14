@@ -1,7 +1,9 @@
-"""`python -m hub.api` levanta el Admin API con uvicorn (spec/09 Entrega 2
-"FastAPI/OpenAPI"). Separado de `hub.api.app` para que importar
-`create_app` en tests no dispare `load_config()` (que exige
-OPENCTI_URL/OPENCTI_SERVICE_ACCOUNT_TOKEN) ni levante un servidor.
+"""`python -m hub.api` levanta el Admin API con uvicorn. Este entrypoint
+esta separado de `hub.api.app` para que importar `create_app` en tests no
+dispare `load_config()` (que exige OPENCTI_URL/OPENCTI_SERVICE_ACCOUNT_TOKEN)
+ni levante un servidor real.
+
+Autor: Athan Espinoza
 """
 import os
 

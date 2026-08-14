@@ -1,17 +1,21 @@
-"""Reglas de alerta (spec/09-ROADMAP-ACCEPTANCE.md Entrega 4 "Alertas
-email/webhook"; spec/06-OBSERVABILITY.md seccion 5 lista 11 condiciones --
-aca solo las que hoy tienen una senal real disponible sin construir
-infraestructura nueva: OpenCTI desconectado (heartbeat), cursor sin avanzar,
-dead-letter no vacio, destino sin entrega exitosa reciente y feed sin
-rebuild reciente. El resto (espacio en disco, TLS invalido/credencial
-rechazada, caida anormal de volumen historico) se deja sin regla -- no se
-inventan valores falsos para simular una senal que no existe (ver
-spec/PROJECT-MAP.md "Pendiente conocido: Entrega 4").
+"""Reglas de alerta: cada funcion evalua una condicion de salud del Hub y
+decide si dispara una alerta.
+
+Solo se implementan las condiciones que hoy tienen una senal real
+disponible sin construir infraestructura nueva: OpenCTI desconectado
+(heartbeat), cursor sin avanzar, dead-letter no vacio, destino sin entrega
+exitosa reciente y feed sin rebuild reciente. Otras condiciones deseables
+(espacio en disco, TLS invalido/credencial rechazada, caida anormal de
+volumen historico) se dejan sin regla a proposito -- no se inventan
+valores falsos para simular una senal que no existe todavia.
 
 Cada regla es una funcion PURA: recibe datos ya consultados por quien la
 llama (sin abrir conexiones ni hacer I/O aca) y devuelve una lista de
 `AlertCandidate` (una condicion puede disparar para varios recursos a la
-vez -- por ejemplo dead-letter no vacio en dos destinos distintos).
+vez -- por ejemplo dead-letter no vacio en dos destinos distintos). Ser
+pura las hace triviales de testear sin mockear I/O.
+
+Autor: Athan Espinoza
 """
 from dataclasses import dataclass
 from typing import Optional
@@ -28,6 +32,9 @@ class AlertCandidate:
     observed_value: str
 
 
+# `None` (nunca hubo heartbeat) se trata como "no disparar" en vez de como
+# "maximo posible de antiguedad": evita una falsa alerta al arrancar el Hub,
+# antes de que llegue el primer heartbeat real de OpenCTI.
 def evaluate_opencti_disconnected(heartbeat_age_seconds: Optional[float], *, max_age_seconds: int = 120) -> list[AlertCandidate]:
     if heartbeat_age_seconds is None or heartbeat_age_seconds <= max_age_seconds:
         return []
@@ -57,6 +64,10 @@ def evaluate_cursor_not_advancing(unchanged_seconds: Optional[float], *, max_unc
 
 
 def evaluate_dead_letter_nonzero(dead_letters: list[LedgerEntry]) -> list[AlertCandidate]:
+    # Se agrupa por destino (no una alerta por entrada dead-letter): un
+    # destino con 50 entregas fallidas deberia generar una alerta por
+    # destino con el conteo, no 50 alertas individuales que inunden al
+    # operador.
     counts: dict[str, int] = {}
     for entry in dead_letters:
         counts[entry.destination_id] = counts.get(entry.destination_id, 0) + 1
@@ -76,10 +87,10 @@ def evaluate_destination_delivery_stale(
     last_success_seconds_ago: dict[str, Optional[float]], *, max_age_seconds: int
 ) -> list[AlertCandidate]:
     """Umbral unico configurable a nivel Hub (`ALERT_DESTINATION_STALE_SECONDS`),
-    no un SLO por destino -- spec/09 Decision #9 ("SLO de latencia por
-    destino") sigue abierta, sin resolver en esta pasada. Esta es una
-    deteccion mas gruesa: "ningun destino sin entrega exitosa hace mas de
-    X segundos", igual para todos los destinos."""
+    no un SLO por destino -- un SLO de latencia diferenciado por destino
+    todavia no esta resuelto. Esta es una deteccion mas gruesa: "ningun
+    destino sin entrega exitosa hace mas de X segundos", igual para todos
+    los destinos."""
     return [
         AlertCandidate(
             condition="destination_delivery_stale",

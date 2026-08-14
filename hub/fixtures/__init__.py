@@ -1,4 +1,7 @@
-"""Loader de fixtures STIX anonimizadas usadas por los tests de Entrega 0."""
+"""Loader de fixtures STIX anonimizadas usadas por los tests.
+
+Autor: Athan Espinoza
+"""
 import json
 from pathlib import Path
 

@@ -1,15 +1,15 @@
-"""Adaptador MikroTik RouterOS `.rsc` (spec/09-ROADMAP-ACCEPTANCE.md
-Entrega 4 "Integraciones", esfuerzo medio).
+"""Adaptador MikroTik RouterOS `.rsc`.
 
-spec/05-FORMATS-DESTINATIONS.md: "Sin EDL/TAXII nativo. Patron de comunidad:
-`/tool fetch` + Scheduler descarga un script y puebla `address-list`...
-Script RouterOS (`.rsc`) con comandos `add address=... list=...` -- no un
-TXT plano". La spec NO da una plantilla `.rsc` completa (sin mencion de
-flags de `/tool fetch` como `check-certificate`/`mode`/`dst-path`, sin
-convencion de nombre de lista) -- se genera solo el bloque `add` por valor,
-con un comentario en el propio archivo indicando que el operador debe
-envolverlo en su propio Scheduler/`/tool fetch` (limitacion documentada, no
-se inventa una plantilla que la spec no especifico).
+RouterOS no tiene EDL/TAXII nativo. El patron de comunidad es: `/tool
+fetch` + Scheduler descarga un script y puebla `address-list` mediante un
+script RouterOS (`.rsc`) con comandos `add address=... list=...` -- no un
+TXT plano. No hay una plantilla `.rsc` completa estandar (sin convencion de
+flags de `/tool fetch` como `check-certificate`/`mode`/`dst-path`, ni de
+nombre de lista), asi que este adapter genera solo el bloque `add` por
+valor, con un comentario en el propio archivo indicando que el operador debe
+envolverlo en su propio Scheduler/`/tool fetch`: es una limitacion
+documentada a proposito en vez de inventar una plantilla no verificada
+contra un router real.
 
 RouterOS `/ip firewall address-list` solo acepta IPv4/IPv6/CIDR -- nunca
 dominios ni hashes -- asi que este adapter rechaza en `validate()` cualquier
@@ -18,6 +18,8 @@ dominios ni hashes -- asi que este adapter rechaza en `validate()` cualquier
 El `timeout=` de RouterOS (auto-remueve la entrada al vencer) mapea de forma
 natural al `valid_until` del IOC: se recalcula en cada rebuild a partir del
 tiempo restante real, no se congela en el momento del evento.
+
+Autor: Athan Espinoza
 """
 import os
 import re
@@ -29,10 +31,15 @@ from hub.destinations_store import Destination
 from hub.models import CanonicalIOCEvent
 from hub.txt_feed import FeedWriterRegistry
 
+# Unicos tipos de IOC que RouterOS address-list puede almacenar; usado por
+# validate() para rechazar destinos configurados con family/subtype que
+# nunca podrian escribirse en un .rsc valido.
 _SUPPORTED_PREFIXES = ("network/ipv4", "network/ipv6", "network/cidr")
 _ADDRESS_RE = re.compile(r"address=(\S+)")
 
 
+# RouterOS espera el timeout en su propio formato "Xd HH:MM:SS", no segundos
+# crudos ni ISO8601.
 def _format_routeros_timeout(seconds: float) -> str:
     total = max(0, int(seconds))
     days, rem = divmod(total, 86400)
@@ -47,10 +54,14 @@ class MikrotikAdapter:
         self.base_dir = os.path.join(base_dir, destination.destination_id)
         opts = destination.format_options or {}
         self.list_name = opts.get("list_name", destination.destination_id)
+        # Advertencia dejada dentro del propio archivo .rsc (no solo en el
+        # docstring): el operador que abra el archivo en el router necesita
+        # saber, sin leer el codigo del Hub, que falta envolverlo en su
+        # Scheduler/`/tool fetch`.
         header = (
             "# Generado por el Hub -- solo el bloque 'add'. Envolver en el "
-            "propio Scheduler/`/tool fetch` del router (spec/05, sin "
-            "plantilla completa documentada por el fabricante)."
+            "propio Scheduler/`/tool fetch` del router (sin plantilla "
+            "completa documentada por el fabricante)."
         )
         self.registry = FeedWriterRegistry(
             self.base_dir,
@@ -67,6 +78,10 @@ class MikrotikAdapter:
         parts = [f"add address={value}", f"list={self.list_name}", f'comment="{comment}"']
         valid_until_raw = meta.get("valid_until")
         if valid_until_raw:
+            # Recalculado a partir del tiempo restante REAL en cada rebuild
+            # (no el remaining del momento del evento original), para que el
+            # timeout de RouterOS siga siendo correcto aunque el archivo se
+            # reescriba mucho despues de que llego el IOC.
             valid_until = datetime.fromisoformat(valid_until_raw)
             remaining = (valid_until - datetime.now(timezone.utc)).total_seconds()
             if remaining > 0:
@@ -81,6 +96,9 @@ class MikrotikAdapter:
         errors = []
         if self.destination.format not in ("rsc",):
             errors.append("adapter 'mikrotik_rsc' solo soporta destination.format == 'rsc'")
+        # Rechaza en configuracion, no en tiempo de envio: mejor que el
+        # operador vea el error al crear el destino que descubrir en runtime
+        # que RouterOS no puede aceptar un dominio/hash en address-list.
         unsupported = [t for t in self.destination.allowed_ioc_types if not t.startswith(_SUPPORTED_PREFIXES)]
         if unsupported:
             errors.append(
@@ -118,6 +136,9 @@ class MikrotikAdapter:
         return None
 
     def healthcheck(self) -> bool:
+        # Prueba de escritura real (crea y borra un archivo) en vez de solo
+        # verificar la ruta, para exponer problemas de permisos/disco antes
+        # de que ocurran durante un send() real.
         try:
             os.makedirs(self.base_dir, exist_ok=True)
             probe = os.path.join(self.base_dir, ".healthcheck")

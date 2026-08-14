@@ -1,12 +1,13 @@
-"""Motor de politicas configurable (spec/03-ARCHITECTURE.md "Policy engine":
-"Evalua politicas inmutables por version. Devuelve accepted/rejected/
-skipped/revoked mas codigos de razon"; spec/04 "Filtros de seguridad").
+"""Motor de politicas configurable: evalua politicas inmutables por version
+y devuelve accepted/rejected/skipped/revoked mas codigos de razon.
 
-Este es el hueco que Entrega 1 dejo marcado en spec/PROJECT-MAP.md ("falta:
-evaluacion de reglas configurables"): `hub/pipeline.py` en Entrega 1 solo
-aplicaba revoked/expirado/dedup con un TTL fijo por variable de entorno;
-aqui la fuente de la regla es una `PolicyVersion` real, versionada,
-publicada via `hub/policy_store.py`.
+Antes de este modulo, la evaluacion de politica solo aplicaba
+revoked/expirado/dedup con un TTL fijo tomado de una variable de entorno.
+Aqui la fuente de la regla es una `PolicyVersion` real, versionada y
+publicada via `hub/policy_store.py`, para poder cambiar reglas sin redeploy
+y para poder auditar que version decidio cada evento.
+
+Autor: Athan Espinoza
 """
 from datetime import datetime
 from typing import Optional
@@ -20,6 +21,8 @@ DEFAULT_TTL_DAYS = 30
 
 
 def _subtype_allowed(event: CanonicalIOCEvent, policy: PolicyVersion) -> bool:
+    # Un subtipo debe estar explicitamente permitido para su familia en esta
+    # version de politica: no hay permiso implicito por familia completa.
     return any(
         allowed.family == event.family.value and event.subtype in allowed.subtypes
         for allowed in policy.allowed_iocs
@@ -33,6 +36,9 @@ def evaluate(
     default_ttl_days: int = DEFAULT_TTL_DAYS,
     now: Optional[datetime] = None,
 ) -> PolicyDecision:
+    # Orden de evaluacion deliberado: revoked corta antes que cualquier otra
+    # regla, porque un IOC revocado en origen nunca deberia enviarse sin
+    # importar que otras reglas cumpliria.
     if event.revoked:
         return PolicyDecision(outcome=PolicyOutcome.REVOKED, reason=ReasonCode.REVOKED, policy_version=policy.version)
 

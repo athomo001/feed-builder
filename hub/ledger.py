@@ -1,8 +1,13 @@
-"""Event/Delivery ledger (spec/03-ARCHITECTURE.md "Delivery ledger", spec/06
-"Almacenamiento interno de metricas y trazabilidad", Entrega 1).
+"""Event/Delivery ledger: registra el estado de cada intento de entrega de un
+evento a un destino, para trazabilidad y recuperacion tras fallas.
 
-Clave de una entrega: event_id + destination_id + policy_version (spec/03).
+Clave de una entrega: event_id + destination_id + policy_version -- una
+misma entrega puede reintentarse bajo una version de politica distinta si
+la politica cambio entre intentos, y eso debe quedar como una fila separada
+en vez de pisar el resultado del intento anterior.
 SQLite para MVP single-node, misma decision documentada en hub/cursor_store.py.
+
+Autor: Athan Espinoza
 """
 import sqlite3
 from datetime import datetime
@@ -47,7 +52,11 @@ def init_db(path: str) -> sqlite3.Connection:
         """
     )
     try:
-        # Entrega 2: bases creadas en Entrega 1 no tienen esta columna todavia.
+        # Migracion in-place: bases creadas antes de que existiera la
+        # columna `attempts` no la tienen todavia. ALTER TABLE ADD COLUMN
+        # falla si la columna ya existe, asi que el intento se envuelve en
+        # try/except en vez de chequear el esquema primero -- es idempotente
+        # y mas simple que inspeccionar PRAGMA table_info antes de decidir.
         conn.execute("ALTER TABLE event_ledger ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
     except sqlite3.OperationalError:
         pass
@@ -55,6 +64,10 @@ def init_db(path: str) -> sqlite3.Connection:
     return conn
 
 
+# ON CONFLICT DO UPDATE en vez de INSERT-then-UPDATE separados: hace el
+# upsert atomico frente a reintentos concurrentes del mismo (event_id,
+# destination_id, policy_version), que es exactamente el caso de uso
+# (un evento reintentado varias veces actualiza la misma fila cada vez).
 def upsert_delivery(conn: sqlite3.Connection, entry: LedgerEntry) -> None:
     conn.execute(
         """
@@ -99,6 +112,11 @@ def _row_to_entry(row) -> LedgerEntry:
     )
 
 
+# Orden canonico de columnas de event_ledger, compartido por cada INSERT/
+# SELECT de este modulo: al definirlo una sola vez, un SELECT siempre trae
+# las columnas en el mismo orden que espera `_row_to_entry` (por indice de
+# tupla, no por nombre) y un ALTER TABLE que agregue una columna nueva solo
+# necesita actualizarse aca, no en cada query dispersa por el archivo.
 _COLUMNS = (
     "event_id, stix_id, destination_id, policy_version, state, reason, created_at, updated_at, error, attempts"
 )
@@ -121,9 +139,9 @@ def list_deliveries_for_event(conn: sqlite3.Connection, event_id: str) -> list[L
 
 
 def list_seen_stix_ids(conn: sqlite3.Connection) -> set:
-    """Recuperacion tras reinicio (spec/02 'Reconciliacion'): que objetos STIX
-    ya paso el Hub por el ledger, usado para detectar brechas sin tener que
-    reprocesar todo el historial en memoria."""
+    """Recuperacion tras reinicio: que objetos STIX ya paso el Hub por el
+    ledger, usado para detectar brechas sin tener que reprocesar todo el
+    historial en memoria."""
     rows = conn.execute("SELECT DISTINCT stix_id FROM event_ledger").fetchall()
     return {row[0] for row in rows}
 
@@ -140,10 +158,11 @@ def search_deliveries(
     limit: int = 50,
     offset: int = 0,
 ) -> list[LedgerEntry]:
-    """Inspector del Event Ledger (spec/07-ADMIN-UI-ANGULAR.md "Buscador por
-    event_id, stix_id, delivery_id, destino, fuente o fecha"). Acotado a las
-    columnas que el ledger ya guarda -- no hay Canonical Event Store todavia
-    (family/subtype/valor), ver spec/PROJECT-MAP.md."""
+    """Inspector del Event Ledger para busqueda por event_id, stix_id,
+    destino o fecha. Acotado a las columnas que el ledger ya guarda -- no
+    hay un Canonical Event Store separado todavia, asi que no se puede
+    filtrar por family/subtype/valor del IOC aca, solo por lo que el ledger
+    de entregas registra."""
     clauses, params = [], []
     if event_id is not None:
         clauses.append("event_id = ?")
@@ -173,7 +192,8 @@ def search_deliveries(
 
 
 def list_dead_letters(conn: sqlite3.Connection, *, destination_id: Optional[str] = None) -> list[LedgerEntry]:
-    """spec/03 'Dead-letter para intervencion manual'; spec/06 DLQ."""
+    """Entregas que agotaron reintentos y quedaron en dead-letter, para que
+    un operador las revise/reintente manualmente."""
     if destination_id:
         rows = conn.execute(
             f"SELECT {_COLUMNS} FROM event_ledger WHERE state = ? AND destination_id = ?",

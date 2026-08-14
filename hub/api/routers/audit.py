@@ -1,5 +1,8 @@
-"""spec/07-ADMIN-UI-ANGULAR.md "Auditoria & Configuracion"; spec/08 roles
-("viewer: lectura de estado y auditoria permitida").
+"""Endpoint de solo lectura sobre el log de auditoria. Requiere rol
+`viewer` como el resto de endpoints de lectura, ya que el historial de
+acciones no es mas sensible que el estado que ya se puede consultar.
+
+Autor: Athan Espinoza
 """
 from datetime import datetime
 from typing import Optional
@@ -16,6 +19,9 @@ router = APIRouter(prefix="/admin/api/v1/audit")
 @router.get("")
 def list_all(
     state: APIState = Depends(get_state),
+    # Filtros todos opcionales para poder acotar la busqueda por cualquier
+    # combinacion de actor/accion/recurso/fecha sin necesitar un endpoint
+    # distinto por cada criterio.
     actor_token_id: Optional[str] = Query(default=None),
     action: Optional[str] = Query(default=None),
     resource_type: Optional[str] = Query(default=None),

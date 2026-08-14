@@ -1,9 +1,10 @@
-"""Backoff y circuit breaker (spec/03-ARCHITECTURE.md "Queue y workers":
-"Reintentos con backoff y jitter", "Circuit breaker por destino"; Entrega 2
-"Retries, circuit breaker y dead-letter").
+"""Backoff exponencial con jitter y circuit breaker por destino.
 
 Ambos bloques son puros/inyectables (reloj y jitter como parametros) para
-poder probarlos sin `time.sleep` real, igual que `hub/ttl.py`.
+poder probarlos sin `time.sleep` real ni relojes reales, de la misma forma
+que `hub/ttl.py` recibe `now` como parametro.
+
+Autor: Athan Espinoza
 """
 import random
 import time
@@ -47,6 +48,9 @@ class CircuitBreaker:
 
     @property
     def state(self) -> CircuitState:
+        # Transicion automatica OPEN -> HALF_OPEN pasado `reset_timeout_seconds`:
+        # permite probar si el destino se recupero sin depender de una accion
+        # manual del operador.
         if self._state is CircuitState.OPEN and self._opened_at is not None:
             if self.now_fn() - self._opened_at >= self.reset_timeout_seconds:
                 self._state = CircuitState.HALF_OPEN
@@ -62,6 +66,9 @@ class CircuitBreaker:
 
     def record_failure(self) -> None:
         self._consecutive_failures += 1
+        # Una falla en HALF_OPEN reabre el circuito de inmediato, sin exigir
+        # de nuevo `failure_threshold` fallas: un solo intento de prueba
+        # fallido ya confirma que el destino sigue caido.
         if self.state is CircuitState.HALF_OPEN or self._consecutive_failures >= self.failure_threshold:
             self._state = CircuitState.OPEN
             self._opened_at = self.now_fn()

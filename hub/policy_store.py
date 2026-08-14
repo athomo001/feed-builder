@@ -1,12 +1,12 @@
-"""CRUD y ciclo de vida de politicas versionadas (spec/03-ARCHITECTURE.md
-"Policy engine": "Evalua politicas inmutables por version"; spec/04
-"Ejemplo de politica por destino"; Entrega 2 "simulacion, publicacion y
-rollback").
+"""CRUD y ciclo de vida de politicas versionadas.
 
 El CONTENIDO de una version nunca cambia una vez creada; lo unico que
-transiciona es `status`. Publicar/rollback nunca borra historial (spec/07
-"No borrar eventos del ledger al resetear el cursor" aplica por analogia
-aqui: tampoco se borran versiones de politica).
+transiciona es `status`. Publicar/rollback nunca borra historial, por la
+misma razon por la que no se borran eventos del ledger al resetear un
+cursor: preservar la capacidad de auditar que politica exacta decidio cada
+evento en el pasado.
+
+Autor: Athan Espinoza
 """
 import json
 import sqlite3
@@ -15,6 +15,10 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+# Transiciones validas: draft -> published -> superseded (reemplazada por
+# otra publicacion) o rolled_back (reemplazada por un rollback). Se
+# distinguen esos dos ultimos estados en vez de un unico "inactive" para que
+# el historial permita reconstruir por que dejo de estar activa cada version.
 PolicyStatus = Literal["draft", "published", "superseded", "rolled_back"]
 
 
@@ -106,6 +110,9 @@ def create_draft(
     now: Optional[datetime] = None,
 ) -> PolicyVersion:
     now = now or datetime.now(timezone.utc)
+    # La version siguiente se deriva del maximo existente (no de un contador
+    # separado) para que sea monotonamente creciente por policy_id incluso si
+    # versiones anteriores fueron superseded/rolled_back.
     row = conn.execute(
         "SELECT COALESCE(MAX(version), 0) FROM policy_versions WHERE policy_id = ?", (policy_id,)
     ).fetchone()
@@ -164,6 +171,8 @@ def publish(conn: sqlite3.Connection, policy_id: str, version: int, *, now: Opti
     if target is None:
         raise ValueError(f"policy '{policy_id}' version {version} no existe")
 
+    # La version activa anterior pasa a "superseded" (no se borra) para que
+    # el historial siga siendo consultable despues de publicar la nueva.
     current = get_active_version(conn, policy_id)
     if current is not None and current.version != version:
         _update_status(conn, policy_id, current.version, status="superseded")
@@ -173,14 +182,16 @@ def publish(conn: sqlite3.Connection, policy_id: str, version: int, *, now: Opti
 
 
 def rollback(conn: sqlite3.Connection, policy_id: str, version: int, *, now: Optional[datetime] = None) -> PolicyVersion:
-    """Reactiva una version previa sin alterar su contenido (spec/09
-    decision #: rollback via UI/API con rol security-admin en la spec de UI;
-    aqui se expone via policy-admin, ver spec/08 roles)."""
+    """Reactiva una version previa sin alterar su contenido."""
     now = now or datetime.now(timezone.utc)
     target = get_version(conn, policy_id, version)
     if target is None:
         raise ValueError(f"policy '{policy_id}' version {version} no existe")
 
+    # A diferencia de `publish`, aqui la version reemplazada se marca
+    # "rolled_back" (no "superseded"): son la misma mecanica de reemplazo,
+    # pero el motivo del cambio queda registrado de forma distinta para el
+    # historial/auditoria.
     current = get_active_version(conn, policy_id)
     if current is not None and current.version != version:
         _update_status(conn, policy_id, current.version, status="rolled_back")

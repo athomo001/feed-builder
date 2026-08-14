@@ -1,10 +1,12 @@
-"""Expiracion efectiva de un IOC (spec/04-IOC-MODEL-POLICIES.md "TTL y vigencia", Entrega 1).
+"""Expiracion efectiva de un IOC.
 
-"La expiracion efectiva es el minimo de: valid_until del objeto (si existe),
+La expiracion efectiva es el minimo de: valid_until del objeto (si existe),
 created_at/modified_at mas TTL de politica, TTL maximo del destino, ventana
-global de retencion." Se usa modified_at como base cuando esta disponible
+global de retencion. Se usa modified_at como base cuando esta disponible
 (refleja el ultimo estado conocido, incluyendo renovaciones por update) y se
 cae a created_at si no hay modified_at.
+
+Autor: Athan Espinoza
 """
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -29,6 +31,9 @@ def effective_expiration(
     if retention_window_days is not None:
         candidates.append(base_ts + timedelta(days=retention_window_days))
 
+    # El minimo entre todos los limites aplicables: cualquiera de ellos puede
+    # volver invalido el IOC antes que los demas, y el mas restrictivo debe
+    # ganar (nunca se sirve un IOC mas alla del limite mas corto).
     return min(candidates)
 
 

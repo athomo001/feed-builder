@@ -1,7 +1,4 @@
-"""Renderizado STIX 2.1 nativo (spec/09-ROADMAP-ACCEPTANCE.md Entrega 4
-"Integraciones", alto esfuerzo: "STIX 2.1 nativo"; spec/05-FORMATS-
-DESTINATIONS.md "STIX 2.1: Bundle preservando id, type, created, modified,
-labels, markings, confidence y revoked").
+"""Renderizado STIX 2.1 nativo.
 
 Un `CanonicalIOCEvent` se traduce a un SDO `indicator` de STIX 2.1. El
 `pattern` usa el Cyber Observable estandar por familia/subtipo cuando existe
@@ -14,9 +11,11 @@ forzarlo dentro de un tipo que no le corresponde.
 El diccionario `hashes` de STIX es vocabulario abierto (no una enumeracion
 cerrada): los algoritmos sin nombre "famoso" (SHA-224, SHA-384, imphash,
 authentihash, pehash, custom-hash) se escriben tal cual, en mayusculas, en
-vez de convertirlos silenciosamente a SHA-256 u otro algoritmo que no son
-(spec/09 "Mantiene algoritmos de hash separados y no mezcla... por
-defecto").
+vez de convertirlos silenciosamente a SHA-256 u otro algoritmo que no son,
+para no perder informacion ni mezclar algoritmos distintos bajo un mismo
+nombre.
+
+Autor: Athan Espinoza
 """
 import json
 import os
@@ -24,6 +23,7 @@ import uuid
 from typing import Optional
 
 from hub.models import CanonicalIOCEvent, Family
+from hub.tracing import span
 from hub.txt_feed import FeedWriteResult, OverflowStrategy
 
 # Namespace fijo y propio del Hub para generar IDs STIX deterministicos
@@ -49,6 +49,9 @@ def _stix_timestamp(dt) -> str:
 
 def _pattern_for(event: CanonicalIOCEvent) -> str:
     family, subtype, value = event.family, event.subtype, event.normalized_value
+    # STIX patterns son un mini-lenguaje propio: comillas simples y
+    # backslash dentro del valor deben escaparse para no romper la sintaxis
+    # del patron.
     escaped = value.replace("\\", "\\\\").replace("'", "\\'")
 
     if family == Family.NETWORK:
@@ -133,7 +136,7 @@ class StixBundleWriter:
     que no encaja en el modelo linea-por-valor de `FeedWriter`. Replica el
     mismo patron: atomic write, capacidad/overflow, releido desde disco
     porque el adapter que lo envuelve es de vida corta (se reconstruye por
-    evento/request, igual que el resto desde Entrega 2)."""
+    evento/request)."""
 
     def __init__(self, path: str, *, max_records: int = 0, overflow_strategy: OverflowStrategy = "newest_first"):
         self.path = path
@@ -150,6 +153,8 @@ class StixBundleWriter:
             with open(self.path, "r", encoding="utf-8") as f:
                 bundle = json.load(f)
         except (OSError, json.JSONDecodeError):
+            # Un bundle corrupto o a medio escribir no debe tumbar el
+            # arranque del writer: se trata como si no hubiera estado previo.
             return
         for obj in bundle.get("objects", []):
             value = obj.get("x_hub_normalized_value")
@@ -166,18 +171,23 @@ class StixBundleWriter:
         return len(self._objects)
 
     def rebuild(self) -> FeedWriteResult:
-        ordered = sorted(self._objects.items(), key=lambda kv: (-kv[1][0], kv[0]))
-        skipped_capacity = 0
-        if self.max_records and len(ordered) > self.max_records:
-            skipped_capacity = len(ordered) - self.max_records
-            ordered = ordered[: self.max_records]
-        objects = [obj for _value, (_sort_key, obj) in ordered]
-        bundle = render_stix_bundle(objects)
+        with span("feed.rebuild", feed_path=self.path):
+            ordered = sorted(self._objects.items(), key=lambda kv: (-kv[1][0], kv[0]))
+            skipped_capacity = 0
+            if self.max_records and len(ordered) > self.max_records:
+                # Igual que en FeedWriter: ya esta ordenado por prioridad,
+                # asi que truncar la cola descarta los de menor prioridad.
+                skipped_capacity = len(ordered) - self.max_records
+                ordered = ordered[: self.max_records]
+            objects = [obj for _value, (_sort_key, obj) in ordered]
+            bundle = render_stix_bundle(objects)
 
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        tmp_path = self.path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(bundle, f, indent=2)
-        os.replace(tmp_path, self.path)
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            tmp_path = self.path + ".tmp"
+            # Mismo patron de escritura atomica que FeedWriter: nunca deja
+            # visible para un lector externo un bundle a medio escribir.
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(bundle, f, indent=2)
+            os.replace(tmp_path, self.path)
 
-        return FeedWriteResult(written=len(objects), skipped_capacity=skipped_capacity)
+            return FeedWriteResult(written=len(objects), skipped_capacity=skipped_capacity)

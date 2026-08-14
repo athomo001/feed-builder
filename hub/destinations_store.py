@@ -1,10 +1,13 @@
-"""CRUD de destinos (spec/05-FORMATS-DESTINATIONS.md "Destino"; Entrega 2
-"CRUD de destinos y politicas").
+"""CRUD de destinos: alta, baja, pausa y consulta de los destinos a los que
+el Hub distribuye IOC.
 
 SQLite, mismo estilo que `hub/cursor_store.py`/`hub/ledger.py`: modelo
 pydantic, columnas JSON para los campos anidados (capacity/retry/
-format_options/allowed_ioc_types) que ya vienen definidos como dict/list en
-la spec.
+format_options/allowed_ioc_types) porque su forma varia segun el adapter
+(por ejemplo `capacity` cambia de shape segun `capacity["mode"]`) y no vale
+la pena modelar cada variante como columnas propias en la tabla.
+
+Autor: Athan Espinoza
 """
 import json
 import sqlite3
@@ -16,10 +19,10 @@ from pydantic import BaseModel, Field
 AdapterType = Literal[
     "txt_feed",
     "http_push",
-    # Entrega 4 (spec/09 "Integraciones"): variantes file_feed con formato
-    # propio (Check Point CSV, MikroTik .rsc, Wazuh CDB, STIX 2.1 bundle) y
-    # los dos api_push/servidor de alto esfuerzo (QRadar Reference Set API,
-    # servidor TAXII 2.1 propio para que Cisco TID haga poll).
+    # Variantes file_feed con formato propio (Check Point CSV, MikroTik
+    # .rsc, Wazuh CDB, STIX 2.1 bundle) y los dos api_push/servidor de alto
+    # esfuerzo (QRadar Reference Set API, servidor TAXII 2.1 propio para que
+    # un cliente TAXII externo haga poll).
     "csv_feed",
     "mikrotik_rsc",
     "wazuh_cdb",
@@ -105,6 +108,12 @@ def _row_to_destination(row) -> Destination:
     )
 
 
+# Orden canonico de columnas de la tabla `destinations`, compartido por
+# cada INSERT/SELECT de este modulo. Existe para que el INSERT (que arma la
+# fila con "?" posicionales) y `_row_to_destination` (que lee la fila por
+# indice de tupla, no por nombre) nunca se desincronicen: cambiar el orden o
+# agregar una columna solo requiere tocar esta constante y el esquema de
+# CREATE TABLE, no cada query individual del archivo.
 _COLUMNS = (
     "destination_id, name, adapter, enabled, paused, endpoint, credential_ref, format, "
     "allowed_ioc_types, format_options, capacity, supports_delete, delete_strategy, "
@@ -112,6 +121,9 @@ _COLUMNS = (
 )
 
 
+# ON CONFLICT DO UPDATE: upsert atomico por destination_id, usado tanto
+# para creacion como para edicion -- el llamador no necesita distinguir
+# "crear" de "actualizar", siempre pasa el objeto completo.
 def upsert_destination(conn: sqlite3.Connection, destination: Destination) -> None:
     conn.execute(
         f"""
@@ -180,6 +192,9 @@ def list_destinations(
 
 
 def set_paused(conn: sqlite3.Connection, destination_id: str, paused: bool) -> Optional[Destination]:
+    # Pausar/reanudar pasa por el mismo upsert que cualquier otra edicion
+    # (en vez de un UPDATE dedicado) para que `updated_at` y la logica de
+    # persistencia se mantengan en un solo camino de codigo.
     destination = get_destination(conn, destination_id)
     if destination is None:
         return None

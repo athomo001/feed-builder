@@ -1,14 +1,15 @@
-"""Reconciliacion periodica via GraphQL (spec/02-OPENCTI-COMPATIBILITY.md
-"Reconciliacion: detecta eventos faltantes, cursor detenido o divergencia
-local"; spec/03-ARCHITECTURE.md flujo "GraphQL reconcile <- alertas <-
-ledger/estado de destinos").
+"""Reconciliacion periodica via GraphQL: detecta eventos faltantes, cursor
+detenido o divergencia local comparando lo que OpenCTI reporta tener contra
+lo que el ledger local ya proceso.
 
 `find_gaps` es deliberadamente una funcion pura: compara lo que GraphQL dice
 que existe contra lo que el ledger local ya vio, sin decidir por si sola que
 hacer con la brecha. `run_reconciliation` es la orquestacion minima: si hay
-brecha, reprocesa la ventana via `run_backfill` (spec/02 paso 7: "pausar la
-confirmacion del cursor, recuperar por GraphQL y reanudar sin duplicar
-gracias al ledger" - el ledger/dedup existente es lo que evita duplicar).
+brecha, reprocesa la ventana via `run_backfill` -- pausando la confirmacion
+del cursor mientras tanto es responsabilidad del llamador; el ledger/dedup
+existente es lo que evita duplicar al reprocesar.
+
+Autor: Athan Espinoza
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,6 +27,8 @@ def find_gaps(client: GraphQLClient, *, since: datetime, seen_stix_ids: Iterable
     gaps: list[str] = []
     cursor = None
 
+    # Se pagina de mas reciente a mas antiguo para poder cortar apenas se
+    # cruce `since`, sin tener que recorrer todo el historial de indicadores.
     while True:
         data = client.query(
             BACKFILL_INDICATORS_QUERY,

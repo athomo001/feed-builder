@@ -1,13 +1,14 @@
-"""Contrato de adapter de destino (spec/05-FORMATS-DESTINATIONS.md "Regla
-general": "El adaptador debe implementar `validate`, `render`, `send`,
-`acknowledge`, `healthcheck` y `close`").
+"""Contrato de adapter de destino: todo adapter debe implementar `validate`,
+`render`, `send`, `acknowledge`, `healthcheck` y `close`.
 
-`AdapterSendResult` es el shape comun de retorno de `send`. Mas alla de los
-6 metodos de la spec, ambos adapters concretos exponen ademas `discard`
-(quitar un valor previamente entregado cuando pasa a revoked/expirado) --
-no esta en la lista original de 05, pero spec/02 "Borrados y
-actualizaciones" exige que el destino reaccione a eso de alguna forma, y no
-hay un metodo declarado para ello en el contrato base.
+`AdapterSendResult` es el shape comun de retorno de `send`. Mas alla de esos
+6 metodos, los adapters concretos exponen ademas `discard` (quitar un valor
+previamente entregado cuando pasa a revoked/expirado): cada tipo de destino
+reacciona distinto a un borrado/revocacion (reescribir un archivo, marcar
+`revoked=true`, hacer un DELETE HTTP), asi que no se declaro en el contrato
+base para no forzar una unica semantica de "borrado" a todos los adapters.
+
+Autor: Athan Espinoza
 """
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
@@ -22,6 +23,9 @@ class AdapterSendResult:
     status_code: Optional[int] = None
 
 
+# Protocol (tipado estructural) en vez de ABC: los adapters concretos no
+# necesitan heredar explicitamente de esta clase, solo implementar los
+# metodos con esta firma -- evita acoplar cada adapter a una jerarquia comun.
 class DestinationAdapter(Protocol):
     def validate(self) -> list[str]: ...
 

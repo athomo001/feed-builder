@@ -1,11 +1,11 @@
-"""Almacenamiento real de `Idempotency-Key` (spec/08-API-SECURITY.md
-"Escritura": "Toda escritura no naturalmente idempotente (POST) acepta el
-header Idempotency-Key... un reintento con la misma clave y el mismo
-payload no debe duplicar el efecto").
+"""Almacenamiento real de `Idempotency-Key`: toda escritura no naturalmente
+idempotente (POST) acepta este header, y un reintento con la misma clave y
+el mismo payload no debe duplicar el efecto.
 
-`hub/idempotency.py` (Entrega 0) valida solo la FORMA del header y deja
-escrito explicitamente que el almacenamiento es trabajo de Entrega 2; este
-modulo es esa pieza.
+`hub/idempotency.py` valida solo la FORMA del header; este modulo es la
+pieza que efectivamente guarda y compara los reintentos.
+
+Autor: Athan Espinoza
 """
 import hashlib
 import json
@@ -17,7 +17,9 @@ from pydantic import BaseModel
 
 
 class IdempotencyConflict(RuntimeError):
-    """Misma Idempotency-Key, payload distinto (spec/08): 409/422 para el caller."""
+    """Misma Idempotency-Key reusada con un payload distinto: es un error del
+    caller (clave mal generada, o reusada entre dos requests distintos), no
+    algo que el servidor deba resolver cacheando -- se traduce a 409/422."""
 
 
 class CachedResponse(BaseModel):
@@ -45,6 +47,9 @@ def init_db(path: str) -> sqlite3.Connection:
 
 
 def hash_request(payload: dict) -> str:
+    # sort_keys + separators fijos hacen el JSON canonico: el mismo payload
+    # logico siempre produce el mismo hash sin importar el orden en que el
+    # caller serializo sus campos originalmente.
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -80,6 +85,10 @@ def store(
     now: Optional[datetime] = None,
 ) -> None:
     now = now or datetime.now(timezone.utc)
+    # INSERT OR REPLACE en vez de INSERT: si dos requests concurrentes con la
+    # misma key llegan a la vez, la ultima en escribir gana en vez de fallar
+    # por violacion de PRIMARY KEY -- aceptable porque get_cached ya valido
+    # que ambas comparten el mismo request_hash antes de llegar aca.
     conn.execute(
         "INSERT OR REPLACE INTO idempotency_keys "
         "(idempotency_key, endpoint, request_hash, status_code, response_body, created_at) "

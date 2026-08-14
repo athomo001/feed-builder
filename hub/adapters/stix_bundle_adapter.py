@@ -1,5 +1,4 @@
-"""Adaptador de feed materializado STIX 2.1 (spec/09-ROADMAP-ACCEPTANCE.md
-Entrega 4 "Integraciones", alto esfuerzo: "STIX 2.1 nativo").
+"""Adaptador de feed materializado STIX 2.1.
 
 Un `bundle.json` por destino (no uno por subtipo como TXT/CSV -- un bundle
 STIX mezcla todos los tipos de indicator en una sola coleccion). Envuelve
@@ -11,6 +10,8 @@ archivo es una foto del estado actual (se reescribe completo en cada
 rebuild) -- descartar/revocar remueve el objeto del bundle, igual que
 TXT/CSV/rsc/cdb. TAXII si es append/update-only porque un cliente TAXII
 pagina por `added_after` esperando que la coleccion solo crezca.
+
+Autor: Athan Espinoza
 """
 import os
 from datetime import datetime
@@ -42,6 +43,9 @@ class StixBundleAdapter:
         return render_stix_indicator(event)
 
     def send(self, rendered: dict, *, idempotency_key: Optional[str] = None) -> AdapterSendResult:
+        # sort_key viene de "modified" (no de un timestamp separado) porque
+        # el objeto STIX ya trae su propio campo temporal canonico -- evita
+        # mantener dos nociones distintas de "cuando cambio este indicator".
         value = rendered["x_hub_normalized_value"]
         sort_key = datetime.fromisoformat(rendered["modified"].replace("Z", "+00:00")).timestamp()
         self.writer.upsert(value, sort_key=sort_key, stix_object=rendered)
@@ -57,6 +61,8 @@ class StixBundleAdapter:
         return None
 
     def healthcheck(self) -> bool:
+        # Prueba de escritura real, no solo un chequeo de ruta: detecta
+        # permisos/disco read-only antes de que un send() real falle.
         try:
             os.makedirs(self.base_dir, exist_ok=True)
             probe = os.path.join(self.base_dir, ".healthcheck")

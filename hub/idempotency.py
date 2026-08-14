@@ -1,16 +1,20 @@
-"""Contrato del header Idempotency-Key (spec/08-API-SECURITY.md "Escritura").
+"""Contrato del header Idempotency-Key.
 
-Basado en el draft IETF httpapi-idempotency-key-header citado en la spec:
-un reintento con la misma clave y el mismo payload no debe duplicar el
-efecto. Este modulo solo valida la FORMA del valor del header; el
-almacenamiento/comparacion de reintentos es responsabilidad de la Entrega 2
-(Admin API), no de este contrato.
+Basado en el draft IETF httpapi-idempotency-key-header: un reintento con la
+misma clave y el mismo payload no debe duplicar el efecto. Este modulo solo
+valida la FORMA del valor del header; el almacenamiento/comparacion de
+reintentos contra ese valor es responsabilidad de quien procesa la
+peticion, no de este contrato.
+
+Autor: Athan Espinoza
 """
 
 MAX_IDEMPOTENCY_KEY_LENGTH = 255
 
 
 def is_valid_idempotency_key(key: str) -> bool:
+    # Limite defensivo: evita aceptar un valor arbitrariamente largo como
+    # clave, lo que podria usarse para inflar el almacenamiento de reintentos.
     if not key or len(key) > MAX_IDEMPOTENCY_KEY_LENGTH:
         return False
     if not key.isascii():

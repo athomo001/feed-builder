@@ -1,20 +1,19 @@
-"""Adaptador GraphQL indicator -> envelope STIX-like (spec/02-OPENCTI-COMPATIBILITY.md
-"Backfill", "Extraer IOC desde objetos STIX y campos explicitos, nunca desde
-cualquier string del payload").
+"""Adaptador GraphQL indicator -> envelope STIX-like.
 
 Backfill y reconciliacion usan GraphQL, no el Live Stream, asi que el shape
 de respuesta es distinto (campos directos como `x_opencti_main_observable_type`
 en vez de `extensions.*`). En vez de escribir un segundo clasificador,
 este modulo re-empaqueta el nodo GraphQL en el mismo envelope que ya
 entiende `hub.normalize.normalize_stix_indicator`, para que exista un unico
-punto de clasificacion (spec/04 "El tipo no se deduce solo por longitud o
-regex").
+punto de clasificacion de IOC en todo el sistema.
 
-Nota de alcance (ver plan de Entrega 1): los nombres de campo GraphQL de
-abajo siguen la documentacion publica de OpenCTI, pero no fueron validados
-contra una instancia real en este entorno; spec/02 "Versionar el adaptador
-OpenCTI y probarlo contra la version soportada" queda pendiente hasta poder
-correr contra un OpenCTI real (ver spec/PROJECT-MAP.md).
+Nota de alcance: los nombres de campo GraphQL de abajo siguen la
+documentacion publica de OpenCTI, pero no fueron validados contra una
+instancia real en este entorno; queda pendiente confirmarlos y versionar
+el adaptador contra la version de OpenCTI soportada en cuanto se pueda
+correr contra una instancia real.
+
+Autor: Athan Espinoza
 """
 INDICATOR_FIELDS = """
     id
@@ -53,9 +52,9 @@ query BackfillIndicators($first: Int!, $after: ID, $orderBy: IndicatorsOrdering,
 }}
 """
 
-# Entrega 2 "POST /deliveries/{delivery_id}/retry": re-deriva el indicador
-# por stix_id en vez de cachear el payload completo (OpenCTI sigue siendo
-# la fuente de verdad, spec/SPEC_DRIVEN_DEVELOPMENT.md).
+# Usado para re-derivar el indicador por stix_id al reintentar una entrega,
+# en vez de cachear el payload completo: OpenCTI sigue siendo la fuente de
+# verdad, asi que un reintento siempre relee el estado actual del indicador.
 GET_INDICATOR_QUERY = f"""
 query GetIndicator($id: String!) {{
   indicator(id: $id) {{ {INDICATOR_FIELDS} }}
@@ -64,6 +63,9 @@ query GetIndicator($id: String!) {{
 
 
 def _edge_values(node: dict, field: str, value_key: str) -> list[str]:
+    # GraphQL Relay-style connections envuelven cada valor en edges[].node;
+    # este helper desenvuelve eso una sola vez para los tres campos (labels,
+    # markings, observables) que comparten la misma forma.
     edges = ((node.get(field) or {}).get("edges")) or []
     values = []
     for edge in edges:

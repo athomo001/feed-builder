@@ -36,6 +36,11 @@ export class LoginComponent {
   readonly checking = signal(false);
   readonly error = signal<string | null>(null);
 
+  // Entrega 5 "OIDC/SSO": navegacion de pagina completa (no una ruta
+  // Angular) -- el flujo de redirect a un IdP externo y de vuelta necesita
+  // una recarga real del navegador, no client-side routing.
+  readonly ssoLoginUrl = `${environment.apiBaseUrl}/auth/oidc/login`;
+
   submit(): void {
     const token = this.token().trim();
     if (!token) {

@@ -1,7 +1,10 @@
-"""spec/06-OBSERVABILITY.md "Endpoints y senales de salud"; spec/08 `GET
-/status`, `GET /metrics`. Liveness/readiness quedan sin auth (un
-orquestador de contenedores no manda Bearer token); `/status` y `/metrics`
-requieren rol `viewer` como el resto de lectura (spec/08 roles).
+"""Endpoints de salud y metricas del Admin API. Liveness/readiness quedan
+sin auth porque un orquestador de contenedores no manda Bearer token al
+hacer el probe; `/status` y `/metrics` si requieren rol `viewer` como el
+resto de endpoints de solo lectura, ya que exponen detalle operativo del
+Hub que no deberia ser publico.
+
+Autor: Athan Espinoza
 """
 import sqlite3
 from collections import Counter
@@ -17,11 +20,17 @@ router = APIRouter()
 
 @router.get("/healthz/liveness")
 def liveness():
+    # Siempre 200 mientras el proceso responda: liveness solo debe fallar si
+    # el proceso esta trabado, no si una dependencia (DB, OpenCTI) esta caida
+    # -- eso lo cubre readiness, para no forzar un reinicio innecesario.
     return {"status": "ok"}
 
 
 @router.get("/healthz/readiness")
 def readiness(response: Response, state: APIState = Depends(get_state)):
+    # Un SELECT trivial contra el ledger es suficiente para detectar que la
+    # conexion SQLite quedo inutilizable (disco lleno, archivo corrupto,
+    # etc.); 503 le indica al orquestador que saque el pod de rotacion.
     try:
         state.ledger_conn.execute("SELECT 1")
     except sqlite3.Error:
@@ -45,7 +54,9 @@ def status(state: APIState = Depends(get_state), _token=Depends(require_role("vi
 
 @router.get("/admin/api/v1/metrics")
 def metrics(state: APIState = Depends(get_state), _token=Depends(require_role("viewer"))):
-    # spec/06 "No incluir valores IOC, tokens, URLs con secretos... en labels".
+    # Las labels del contador solo llevan destination_id y estado, nunca el
+    # valor del IOC, un token o una URL con secretos: estas metricas pueden
+    # terminar en un backend externo (Prometheus) fuera del control del Hub.
     rows = state.ledger_conn.execute("SELECT state, destination_id FROM event_ledger").fetchall()
     counts = Counter((row[0], row[1]) for row in rows)
 

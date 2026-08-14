@@ -1,11 +1,13 @@
-"""Adaptador servidor TAXII 2.1 (spec/09-ROADMAP-ACCEPTANCE.md Entrega 4,
-alto esfuerzo). A diferencia del resto de adapters `file_feed` (una foto que
-se reescribe completa en cada rebuild), una coleccion TAXII es append/
-update-only por convencion del protocolo -- un cliente pagina por
-`added_after` esperando que la coleccion solo crezca, nunca que un objeto
-desaparezca en silencio. `discard()` republica el mismo indicator con
-`revoked=true` y `modified` actualizado en vez de borrarlo (spec/02 "nunca
-ocultar una actualizacion legitima").
+"""Adaptador servidor TAXII 2.1. A diferencia del resto de adapters
+`file_feed` (una foto que se reescribe completa en cada rebuild), una
+coleccion TAXII es append/update-only por convencion del protocolo -- un
+cliente pagina por `added_after` esperando que la coleccion solo crezca,
+nunca que un objeto desaparezca en silencio. Por eso `discard()` republica
+el mismo indicator con `revoked=true` y `modified` actualizado en vez de
+borrarlo: nunca se oculta una actualizacion legitima, se deja que el
+cliente vea explicitamente que el indicator fue revocado.
+
+Autor: Athan Espinoza
 """
 from typing import Optional
 
@@ -37,6 +39,10 @@ class Taxii2Adapter:
         return AdapterSendResult(success=True, detail=f"stix_id={rendered['id']}")
 
     def discard(self, event: CanonicalIOCEvent) -> AdapterSendResult:
+        # Marca revoked=True en vez de eliminar la fila (ver rationale en el
+        # docstring del modulo): un cliente TAXII que ya vio este objeto
+        # necesita poder observar la revocacion, no un objeto que
+        # simplemente desaparece de la coleccion.
         rendered = render_stix_indicator(event)
         rendered["revoked"] = True
         upsert_object(self.conn, self.destination.destination_id, rendered)
@@ -46,6 +52,8 @@ class Taxii2Adapter:
         return None
 
     def healthcheck(self) -> bool:
+        # Sin conexion a taxii_store no hay donde escribir: el healthcheck
+        # de este adapter se reduce a "hay conexion configurada".
         return self.conn is not None
 
     def close(self) -> None:

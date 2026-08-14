@@ -1,0 +1,54 @@
+# Config de ejemplo del OpenTelemetry Collector (spec/09-ROADMAP-ACCEPTANCE.md
+# Entrega 5 "Producción"; spec/06-OBSERVABILITY.md seccion 4: "Usar
+# OpenTelemetry Collector para recibir, procesar, filtrar datos sensibles,
+# aplicar batching/retry y exportar a los backends elegidos").
+#
+# Aditivo y opcional (spec/06 seccion 2): el Hub funciona completo sin este
+# Collector corriendo -- solo hace falta si la instalacion ya usa OTel/
+# Prometheus y quiere sumar al Hub como una fuente mas. Se activa seteando
+# OTEL_EXPORTER_OTLP_ENDPOINT (ver hub/config.py, hub/tracing.py) apuntando
+# a la URL de este Collector (no directo a un backend).
+#
+# El backend de exportacion es un placeholder ("logging"): en produccion se
+# reemplaza por el receiver del backend real (Jaeger, Tempo, un SaaS de
+# observabilidad, etc.) -- decision de cada instalacion, no del Hub.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch: {}
+
+  # Filtra atributos con pinta de secreto antes de exportar -- ademas de que
+  # el Hub nunca pone credential_ref resuelto en un atributo de span (solo
+  # nombres/ids), esta capa es una defensa adicional por si un backend o una
+  # instrumentacion futura agrega algo sensible sin darse cuenta.
+  attributes/scrub_secrets:
+    actions:
+      - key: credential_ref
+        action: delete
+      - key: authorization
+        action: delete
+      - key: http.request.header.authorization
+        action: delete
+      - key: cookie
+        action: delete
+
+exporters:
+  # Placeholder: imprime los spans recibidos a stdout del Collector, util
+  # para confirmar que la instrumentacion llega antes de conectar un backend
+  # real. Reemplazar/agregar el exporter del backend elegido.
+  logging:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [attributes/scrub_secrets, batch]
+      exporters: [logging]

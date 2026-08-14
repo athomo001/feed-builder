@@ -4,6 +4,44 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y versionado según [SemVer](https://semver.org/lang/es/). Las versiones del Hub (`hub/__version__`) están alineadas a las Entregas de [spec/09-ROADMAP-ACCEPTANCE.md](spec/09-ROADMAP-ACCEPTANCE.md): `0.1.0` = Entrega 0, `0.1.1` = Entrega 1, `0.1.2` = Entrega 2, y así sucesivamente, cambios importantes seria  0.2.0 y cambios nivel estructura  serian 1.0.0, 2.0.0 . El script legado `opencti_feed_builder.py` no versiona por separado; sus cambios relevantes también quedan registrados aquí.
 
+## [0.1.8] - 2026-08-14 - Corrección de despliegue y limpieza de comentarios
+
+Sin cambios funcionales en `hub/`. Dos correcciones acumuladas a lo largo de las Entregas 0-5 que nunca se habían revisado:
+
+### Corregido
+
+- **`docker-compose.yml`/`feed-builder.yml`/`.env`/`.env.example`/`nginx.conf` desplegaban todo el stack de OpenCTI** (redis, elasticsearch, minio, rabbitmq, opencti, worker, conectores) más el script legado `opencti_feed_builder.py`, en vez de únicamente el Hub (`hub-service`+`hub-api`+`nginx`) contra una instancia de OpenCTI ya desplegada aparte — ver `spec/03-ARCHITECTURE.md` para las dos topologías soportadas (co-ubicado vía red Docker externa, o remoto vía HTTPS). Reescritos los 5 archivos; `nginx.conf` reduce su alcance a TLS + `/feeds/` + reverse-proxy a `hub-api` (`/admin/api/`, `/taxii2/`, `/healthz/`) + servir el build estático de Angular, sin proxy a `opencti:8080`/`/stream/`.
+- **`nginx.conf.example` eliminado** por redundante (duplicaba `nginx.conf`, que ya es la plantilla genérica vía `envsubst`), pero la regla `nginx.conf` / `!nginx.conf.example` en `.gitignore` (pensada para cuando `nginx.conf` traía IP/hostname reales hardcodeados) no se actualizó junto con eso — dejaba el nuevo `nginx.conf`, ya genérico, completamente fuera de control de versiones sin avisar. Corregida la regla: `nginx.conf` se versiona.
+- **Comentarios de código citaban su origen interno** (`spec/NN-....md`, "Entrega N", `AUDITORIA.md`) en los 77 archivos de `hub/` y los 3 de `scripts/` — información de seguimiento de proyecto sin valor para quien simplemente lee el código. Eliminadas las citas conservando la razón de fondo cuando la había (por qué se tomó tal decisión de diseño, no de dónde salió el requisito). Se agregó `Autor: Athan Espinoza` a los 80 archivos (antes solo estaba en unos pocos) y comentarios de flujo donde antes solo había un docstring al inicio del archivo y nada más (ejemplo puntual señalado por el usuario: `_COLUMNS` en `hub/destinations_store.py` ahora explica por qué existe esa lista de columnas).
+
+Verificación tras ambos cambios: `pytest` (473 tests), `ng build`, `ng test`, `npx playwright test` y `docker compose config` (ambos archivos) en verde.
+
+## [0.1.7] - 2026-08-14 - Entrega 5: Producción
+
+`spec/09-ROADMAP-ACCEPTANCE.md` "Entrega 5": PostgreSQL escalable, OIDC/SSO y RBAC, secret manager, OpenTelemetry Collector, endurecimiento de producción (load test, chaos/recovery, backup/restore, rotación). El roadmap dejaba 2 decisiones abiertas directamente relevantes (#2 SQLite vs PostgreSQL, #5 OIDC/SSO vs usuario/contraseña local); se fijaron explícitamente — ver "Decisiones fijadas" abajo.
+
+### Agregado
+
+- **Secret manager (cifrado en reposo)**: `hub/secret_encryption.py` (Fernet/`cryptography`, clave nunca en la DB ni en `state_dir`) + `hub/secrets_store.py`. `hub/credentials.py::resolve_credential_ref` gana el esquema `secret://<name>` junto al `env://` ya existente — mismo punto único de resolución, ambos conviven. `hub/api/routers/secrets.py`: `POST`/`GET`/`DELETE /admin/api/v1/secrets`, `.../test` (descifra y confirma sin exponer el valor), `.../rotate-key` (re-cifra todo, rol `security-admin`). `secrets_conn`/`cipher` enhebrados por los ~6 call sites existentes que resuelven `credential_ref` (`HttpPushAdapter`, `QRadarAdapter`, el router TAXII, los dos canales de alerta).
+- **OIDC/SSO**: cliente OIDC genérico Authorization Code + PKCE (`hub/oidc_client.py`: discovery, JWKS, validación de ID token con algoritmos permitidos explícitos — nunca `alg=none` —, mapeo de claims a rol) + sesión por cookie HttpOnly+Secure+SameSite=Lax (`hub/oidc_session_store.py`, mismo patrón de hash que `hub/api/token_store.py`). `hub/api/routers/oidc_auth.py`: `/auth/oidc/login`\|`/callback`, `/auth/logout`, `/auth/whoami`. `hub/api/auth.py::require_role` acepta Bearer **o** sesión OIDC indistintamente. Los API tokens de Entrega 2 se mantienen sin cambios para automatización — spec/08 los trata como mecanismo separado, no reemplazado. UI: botón "Entrar con SSO" (navegación de página completa, no una ruta Angular), `AuthService` detecta una sesión existente al arrancar (`GET /auth/whoami` via `provideAppInitializer`) sin guardar nada persistente del lado del cliente.
+- **OpenTelemetry**: `hub/tracing.py`, aditivo/opcional por diseño (spec/06: sin `OTEL_EXPORTER_OTLP_ENDPOINT`, el tracer global de OTel ya es no-op, cero guards condicionales en el código instrumentado). Los 7 spans de spec/06 sección 4 instrumentados: `opencti.stream.receive`/`opencti.event.normalize` (`hub/service.py`, `hub/pipeline.py`), `policy.evaluate` (`hub/pipeline.py`), `delivery.render`/`.send`/`.acknowledge` (`hub/delivery_runner.py`), `feed.rebuild` (`hub/txt_feed.py`, `hub/stix_bundle.py`). Config de ejemplo del Collector en `deploy/otel-collector-config.yaml` con un processor que filtra atributos con pinta de secreto antes de exportar.
+- **Endurecimiento de producción**: `scripts/backup_state.py`/`restore_state.py` (tar de `HUB_STATE_DIR`+`TXT_FEED_DIR`, timestamped, protegido contra path traversal al restaurar, rechaza sobrescribir sin `--force`); `tests/hub/test_chaos_opencti_outage.py` (conexión SSE simulada que falla y se recupera, verifica el backoff/reconexión ya construido desde Entrega 1 — hueco de cobertura que `tests/hub/test_service.py` no ejercitaba); `scripts/load_test.py` (carga concurrente simple contra el Admin API, sin dependencia nueva). `docs/RUNBOOK.md` nuevo: procedimientos de backup/restore (+ prueba mensual, spec/06), recuperación ante caída de OpenCTI, rotación de la clave de cifrado de secretos, recuperación de dead-letter.
+
+### Decisiones fijadas (spec/09 las dejaba abiertas)
+
+- **#2 PostgreSQL**: solo se documenta el camino de migración (`spec/PROJECT-MAP.md` "Pendiente conocido: Entrega 5"), no se escribe código Postgres en esta pasada — los 12 módulos `hub/*_store.py` siguen sobre SQLite.
+- **#5 OIDC/SSO**: cliente genérico probado contra un IdP simulado (mismo patrón de honestidad que QRadar/TAXII en Entrega 4), sin fallback de usuario/contraseña local; API tokens de Entrega 2 sin cambios.
+- **Secret manager**: cifrado en reposo con clave externa, no una integración con un secret manager externo real (Vault u otro) — spec/08 acepta ambos como equivalentes.
+
+### Conocido / pendiente
+
+- Migración real a PostgreSQL: solo documentada, sin driver ni código de conexión en el repo.
+- Sin integración con un secret manager externo real (HashiCorp Vault, AWS Secrets Manager, etc.).
+- OIDC sin validar contra un IdP real (Keycloak/Okta/Azure AD) — probado contra un simulador con keypair RSA propio.
+- Chaos test acotado a la caída de OpenCTI: sin chaos test de caída de un destino o de una base SQLite puntual.
+- Load test simple, no una herramienta de carga real (k6/locust/gatling).
+- Archivo histórico de IOC (spec/06) y SLO de latencia por destino (Decisión #9) siguen sin resolver.
+
 ## [0.1.6] - 2026-08-14 - Entrega 4: Integraciones
 
 Adapters de destino priorizados por esfuerzo real (`spec/05-FORMATS-DESTINATIONS.md` "Modos de entrega y esfuerzo relativo"), servidor TAXII 2.1 propio y alertas email/webhook (`spec/09-ROADMAP-ACCEPTANCE.md` Entrega 4). El roadmap dejaba 6 decisiones abiertas para esta entrega (#4, #8, #9, #10, #11, #12); se fijaron explícitamente en vez de dejarlas sin resolver — ver "Decisiones fijadas" abajo.

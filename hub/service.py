@@ -1,13 +1,13 @@
-"""Orquestacion del flujo operativo (spec/02-OPENCTI-COMPATIBILITY.md "Flujo
-operativo"): validar conexion -> backfill acotado -> abrir Live Stream ->
-normalizar -> politicas -> persistir -> reconciliacion periodica -> apagado
-cooperativo.
+"""Orquestacion del flujo operativo: validar conexion -> backfill acotado ->
+abrir Live Stream -> normalizar -> politicas -> persistir -> reconciliacion
+periodica -> apagado cooperativo.
 
 Puerto del loop principal de opencti_feed_builder.py (backoff/reconexion,
 apagado cooperativo con SIGTERM/SIGINT, heartbeat) sobre los modulos nuevos
-de Entrega 1 (hub.sse, hub.graphql_client, hub.backfill, hub.reconcile,
-hub.pipeline, hub.txt_feed), en vez de la logica de extraccion ad-hoc del
-script legado.
+(hub.sse, hub.graphql_client, hub.backfill, hub.reconcile, hub.pipeline,
+hub.txt_feed), en vez de la logica de extraccion ad-hoc del script legado.
+
+Autor: Athan Espinoza
 """
 import json
 import os
@@ -35,11 +35,19 @@ from hub.pipeline import DedupState, process_envelope
 from hub.policy_store import init_db as init_policies_db
 from hub.reconcile import run_reconciliation
 from hub.retry import CircuitBreaker
+from hub.secret_encryption import load_cipher
+from hub.secrets_store import init_db as init_secrets_db
 from hub.sse import iter_sse_events
 from hub.taxii_store import init_db as init_taxii_db
+from hub.tracing import configure_tracing, span
 
+# Intervalo de evaluacion de alertas: independiente del ciclo del Live
+# Stream (que puede tardar mucho entre eventos si OpenCTI esta callado), asi
+# que se chequea por tiempo transcurrido, no por evento procesado.
 _ALERT_EVAL_INTERVAL_SECONDS = 60
 
+# Query minima y barata: solo sirve para confirmar que la URL, el TLS y el
+# token son validos antes de arrancar backfill/stream, sin traer datos reales.
 _PING_QUERY = "query HubPing { indicators(first: 1) { pageInfo { hasNextPage } } }"
 
 
@@ -47,8 +55,12 @@ def _log(msg: str) -> None:
     print(f"[hub] {msg}", flush=True)
 
 
-# --- Apagado cooperativo (spec/09 Entrega 1 "graceful shutdown") ----------
+# --- Apagado cooperativo ----------------------------------------------------
 
+# Flag a nivel de modulo (no de instancia) porque signal.signal() solo puede
+# registrar funciones con firma (signum, frame): no hay forma de pasarle una
+# referencia a HubRuntime, asi que el loop principal y el handler de senales
+# necesitan compartir un estado accesible desde ambos sin esa referencia.
 _shutdown_requested = False
 
 
@@ -62,6 +74,9 @@ def shutdown_requested() -> bool:
 
 
 def reset_shutdown_for_tests() -> None:
+    # El flag es un global de modulo que persiste entre tests dentro del
+    # mismo proceso; sin este reset, un test que pide shutdown dejaria el
+    # flag en True para los tests que corren despues.
     global _shutdown_requested
     _shutdown_requested = False
 
@@ -74,6 +89,9 @@ def _heartbeat_path(config: HubConfig) -> str:
 
 
 def write_heartbeat(path: str) -> None:
+    # Escribe a un archivo temporal y luego renombra (os.replace es atomico
+    # en POSIX y Windows) para que un healthcheck concurrente nunca vea un
+    # archivo truncado o a medio escribir.
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(repr(time.time()))
@@ -104,11 +122,17 @@ def stream_url(config: HubConfig) -> str:
 
 
 def validate_connection(client: GraphQLClient) -> None:
-    """spec/02 flujo de entrada paso 1: 'Validar URL, TLS y token'."""
+    """Primer paso del flujo de entrada: falla rapido (URL/TLS/token
+    invalidos) antes de invertir tiempo en backfill o abrir el Live Stream."""
     client.query(_PING_QUERY)
 
 
 class HubRuntime:
+    # Agrupa toda la conexion a OpenCTI y el estado persistente (una base
+    # SQLite por concern: cursor, ledger, destinos, politicas, etc.) para que
+    # `run()` tenga un unico objeto que pasar entre las fases del flujo
+    # (backfill, live stream, reconciliacion) en vez de cablear cada modulo
+    # de estado por separado en cada fase.
     def __init__(self, config: HubConfig):
         self.config = config
         self.client = GraphQLClient(config.opencti_url, config.opencti_token, verify=config.verify)
@@ -120,30 +144,41 @@ class HubRuntime:
         self.ingestion_control_conn = init_ingestion_control_db(os.path.join(config.state_dir, "ingestion_control.sqlite3"))
         self.taxii_conn = init_taxii_db(os.path.join(config.state_dir, "taxii.sqlite3"))
         self.alerts_conn = init_alerts_db(os.path.join(config.state_dir, "alerts.sqlite3"))
+        self.secrets_conn = init_secrets_db(os.path.join(config.state_dir, "secrets.sqlite3"))
+        self.secret_cipher = load_cipher(config)
         self.dedup_state = DedupState()
+        # Reconstruido desde el ledger al arrancar (no es efimero como
+        # dedup_state) porque la reconciliacion necesita saber que stix_id ya
+        # se vieron incluso despues de un reinicio del proceso.
         self.seen_stix_ids = list_seen_stix_ids(self.ledger_conn)
         # Estado del circuit breaker vive en el proceso, por destino, y
-        # persiste entre llamadas a process() (Entrega 2 "circuit breaker
-        # por destino", hub/retry.py).
+        # persiste entre llamadas a process() (ver hub/retry.py).
         self.circuit_breakers: dict = {}
 
     def _build_adapters(self, destinations) -> dict:
+        # Se reconstruye a partir de la lista de destinos vigente en vez de
+        # cachearse una sola vez: destinos y sus credenciales pueden
+        # habilitarse/pausarse/editarse en caliente desde el Admin API.
         adapters = {}
         for destination in destinations:
             adapters[destination.destination_id] = build_adapter(
-                destination, txt_feed_dir=self.config.txt_feed_dir, taxii_conn=self.taxii_conn
+                destination,
+                txt_feed_dir=self.config.txt_feed_dir,
+                taxii_conn=self.taxii_conn,
+                secrets_conn=self.secrets_conn,
+                cipher=self.secret_cipher,
             )
             if uses_circuit_breaker(destination):
                 self.circuit_breakers.setdefault(destination.destination_id, CircuitBreaker())
         return adapters
 
     def evaluate_alerts(self) -> None:
-        """spec/09 Entrega 4 "Alertas email/webhook": solo las 2 condiciones
-        que dependen de estado in-process de ESTE loop (OpenCTI/cursor). El
-        resto (dead-letter, destino sin entrega, feed sin rebuild) se
-        evaluan desde `POST /admin/api/v1/alerts/evaluate` (proceso del
-        Admin API, que ya tiene ledger/destinos/feeds a mano); no hay IPC
-        entre `hub.service` y `hub.api` mas alla del SQLite compartido."""
+        """Solo evalua aqui las 2 condiciones que dependen del estado
+        in-process de ESTE loop (OpenCTI/cursor). El resto (dead-letter,
+        destino sin entrega, feed sin rebuild) se evalua desde
+        `POST /admin/api/v1/alerts/evaluate` (proceso del Admin API, que ya
+        tiene ledger/destinos/feeds a mano); no hay IPC entre `hub.service` y
+        `hub.api` mas alla del SQLite compartido."""
         heartbeat_age = heartbeat_age_seconds(_heartbeat_path(self.config))
         cursor = load_cursor(self.cursor_conn, self.config.source_id)
         cursor_age = (datetime.now(timezone.utc) - cursor.updated_at).total_seconds() if cursor else None
@@ -174,11 +209,13 @@ class HubRuntime:
                 if existing.resource_id not in active_resource_ids:
                     resolve_alert(self.alerts_conn, existing.alert_id)
 
-        notify_alerts(
-            self.alerts_conn, active_alerts, build_channels(self.config), cooldown_seconds=self.config.alert_cooldown_seconds
-        )
+        channels = build_channels(self.config, secrets_conn=self.secrets_conn, cipher=self.secret_cipher)
+        notify_alerts(self.alerts_conn, active_alerts, channels, cooldown_seconds=self.config.alert_cooldown_seconds)
 
     def process(self, envelope: dict):
+        # Filtra enabled/paused en cada llamada (no una vez al arrancar):
+        # un operador puede pausar o des-habilitar un destino en cualquier
+        # momento y el proximo evento debe respetarlo de inmediato.
         destinations = list_destinations(self.destinations_conn, enabled=True, paused=False)
         adapters = self._build_adapters(destinations)
         result = process_envelope(
@@ -201,6 +238,10 @@ class HubRuntime:
 
 
 def run_backfill_phase(runtime: HubRuntime):
+    # Ventana acotada (backfill_window_days), no historico completo: al
+    # arrancar el Hub por primera vez o tras una pausa larga, traer todo el
+    # historial de OpenCTI podria ser enorme y lento; el resto de eventos
+    # mas viejos que la ventana se asume ya irrelevante para los destinos.
     config = runtime.config
     since = datetime.now(timezone.utc) - timedelta(days=config.backfill_window_days)
     result = run_backfill(
@@ -222,6 +263,10 @@ def run_backfill_phase(runtime: HubRuntime):
 
 
 def run_reconciliation_phase(runtime: HubRuntime):
+    # Corre periodicamente ademas del Live Stream porque el stream puede
+    # perder eventos durante una desconexion/reconexion; comparando contra
+    # seen_stix_ids se detectan y recuperan esos huecos sin depender de que
+    # el stream sea perfectamente confiable.
     config = runtime.config
     since = datetime.now(timezone.utc) - timedelta(days=config.backfill_window_days)
     report = run_reconciliation(
@@ -240,6 +285,9 @@ def run_reconciliation_phase(runtime: HubRuntime):
 # --- Live stream ---------------------------------------------------------
 
 
+# Mientras esta en pausa se sondea el estado de control cada pocos segundos
+# en vez de bloquear indefinidamente: hay que seguir mandando heartbeat y
+# reaccionar rapido si un operador reanuda la ingesta.
 _PAUSE_POLL_INTERVAL_SECONDS = 5
 
 
@@ -251,18 +299,24 @@ def listen_live_stream(runtime: HubRuntime, *, session=None):
         "Accept": "text/event-stream",
     }
 
+    # Retomar desde el ultimo cursor persistido (Last-Event-ID) en vez de
+    # desde el principio del stream: evita reprocesar todo el historial cada
+    # vez que el proceso se reinicia.
     saved_cursor = load_cursor(runtime.cursor_conn, config.source_id)
     last_event_id = saved_cursor.cursor_value if saved_cursor else None
 
-    backoff = 2
+    backoff = 2  # segundos; arranca bajo y se duplica en cada fallo consecutivo (ver abajo)
     heartbeat_path = _heartbeat_path(config)
     next_reconcile_ts = time.time() + config.reconcile_interval_seconds
     next_alert_eval_ts = time.time() + _ALERT_EVAL_INTERVAL_SECONDS
 
+    # Loop de reconexion: una conexion SSE eventualmente se cae (red,
+    # despliegue de OpenCTI, rotacion de balanceador) y hay que volver a
+    # conectar donde se quedo, no terminar el proceso.
     while not shutdown_requested():
-        # spec/07 "OpenCTI / Ingesta": pausar/reanudar y rebobinar cursor se
-        # piden desde el Admin API (proceso separado) via
-        # hub/ingestion_control.py; este loop es quien los aplica.
+        # Pausar/reanudar y rebobinar cursor se piden desde el Admin API
+        # (proceso separado) via hub/ingestion_control.py; este loop es
+        # quien los aplica.
         control = get_control(runtime.ingestion_control_conn, config.source_id)
         if control.paused:
             write_heartbeat(heartbeat_path)  # el proceso sigue vivo, solo no ingesta
@@ -297,9 +351,17 @@ def listen_live_stream(runtime: HubRuntime, *, session=None):
                     max_event_bytes=config.max_sse_event_bytes,
                 ):
                     try:
-                        envelope = json.loads(sse_event.data.decode("utf-8"))
-                        runtime.process(envelope)
+                        # Todavia no existe un event_id/delivery_id propios
+                        # del Hub en este punto (se generan dentro de
+                        # runtime.process) -- el unico identificador
+                        # disponible aca es el id: del propio stream SSE.
+                        with span("opencti.stream.receive", sse_event_id=sse_event.id or ""):
+                            envelope = json.loads(sse_event.data.decode("utf-8"))
+                            runtime.process(envelope)
                     except Exception as e:
+                        # Un evento individual mal formado o que falla en
+                        # process() no debe tumbar todo el stream: se loguea
+                        # y se sigue con el proximo evento.
                         _log(f"EVENT_PROCESS_ERROR: {e}")
 
                     if sse_event.id:
@@ -328,6 +390,9 @@ def listen_live_stream(runtime: HubRuntime, *, session=None):
                         _log("Shutdown requested, closing stream cooperatively")
                         break
         except Exception as e:
+            # Backoff exponencial (tope 60s): si OpenCTI esta caido o en
+            # despliegue, reintentar cada 2s martillearia el servidor sin
+            # necesidad; el tope evita esperar minutos cuando ya volvio.
             _log(f"ERROR: {e} (reconnect in {backoff}s)")
             if shutdown_requested():
                 break
@@ -339,9 +404,13 @@ def listen_live_stream(runtime: HubRuntime, *, session=None):
 
 
 def run(config: HubConfig) -> None:
+    # Registrar los signal handlers antes de crear el runtime: si SIGTERM
+    # llega mientras HubRuntime.__init__ todavia esta abriendo conexiones,
+    # igual queremos que quede marcado el shutdown en vez de perderse.
     signal.signal(signal.SIGTERM, request_shutdown)
     signal.signal(signal.SIGINT, request_shutdown)
 
+    configure_tracing(config)
     runtime = HubRuntime(config)
     write_heartbeat(_heartbeat_path(config))
 
@@ -356,6 +425,9 @@ def run(config: HubConfig) -> None:
 
 def main() -> None:
     config = load_config()
+    # Modo healthcheck: no arranca el loop, solo consulta el heartbeat
+    # escrito por otro proceso corriendo el Hub (util para probes de
+    # contenedor/orquestador sin abrir una conexion nueva a OpenCTI).
     if "--healthcheck" in sys.argv:
         sys.exit(0 if is_healthy(_heartbeat_path(config)) else 1)
     run(config)

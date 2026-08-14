@@ -1,6 +1,10 @@
-"""spec/08-API-SECURITY.md endpoints de `/destinations`; roles: lectura
-`viewer`, escritura `security-admin` ("destinos, credenciales, auth y
-roles"), pausar/reanudar `operator`.
+"""Endpoints de gestion de destinos de distribucion. Lectura requiere
+`viewer`; crear/actualizar un destino requiere `security-admin` porque ahi
+se configuran credenciales, endpoint y auth; pausar/reanudar solo requiere
+`operator` porque es una operacion reversible que no toca la configuracion
+de seguridad del destino.
+
+Autor: Athan Espinoza
 """
 import ipaddress
 from datetime import datetime, timezone
@@ -29,10 +33,10 @@ router = APIRouter(prefix="/admin/api/v1/destinations")
 
 
 def _is_private_endpoint(url: str) -> bool:
-    """SSRF minimo (spec/08 'Seguridad de destino: SSRF protection'):
-    bloquea literales de loopback/red privada en el endpoint configurado.
-    No resuelve DNS -- no protege contra DNS rebinding, solo el caso obvio
-    de un operador apuntando el Hub a si mismo o a la red interna."""
+    """Proteccion SSRF minima: bloquea literales de loopback/red privada en
+    el endpoint configurado. No resuelve DNS -- no protege contra DNS
+    rebinding, solo cubre el caso obvio de un operador apuntando el Hub a
+    si mismo o a la red interna."""
     try:
         host = urlparse(url).hostname
     except ValueError:
@@ -49,7 +53,16 @@ def _is_private_endpoint(url: str) -> bool:
 
 
 def _build_adapter(destination: Destination, state: APIState):
-    return build_adapter(destination, txt_feed_dir=state.config.txt_feed_dir, taxii_conn=state.taxii_conn)
+    # Centraliza el paso de las conexiones/config que cualquier adapter
+    # podria necesitar (txt_feed_dir, taxii, secrets+cipher), para que el
+    # router no tenga que saber cuales usa cada tipo de adapter en particular.
+    return build_adapter(
+        destination,
+        txt_feed_dir=state.config.txt_feed_dir,
+        taxii_conn=state.taxii_conn,
+        secrets_conn=state.secrets_conn,
+        cipher=state.secret_cipher,
+    )
 
 
 @router.get("")
@@ -107,6 +120,9 @@ def update(
         existing = get_destination(state.destinations_conn, destination_id)
         if existing is None:
             raise APIError(404, "Not Found", f"destination '{destination_id}' no existe", error_code="destination_not_found")
+        # exclude_unset=True: solo los campos que el caller efectivamente
+        # mando reemplazan al destino existente (PATCH-like), asi un PUT
+        # parcial no pisa el resto de la configuracion con sus defaults.
         updates = payload.model_dump(exclude_unset=True)
         updated = existing.model_copy(update={**updates, "updated_at": datetime.now(timezone.utc)})
         upsert_destination(state.destinations_conn, updated)
@@ -134,9 +150,9 @@ def test(
     state: APIState = Depends(get_state),
     _token=Depends(require_role("security-admin")),
 ):
-    # spec/05 "El boton de prueba... payload sintetico marcado como test y
-    # no publicar un IOC real": esto valida config/alcanzabilidad basica,
-    # nunca envia un IOC real ni ejercita adapter.send().
+    # Este endpoint solo valida config/alcanzabilidad basica del destino;
+    # nunca envia un IOC real ni ejercita adapter.send(), para que un
+    # operador pueda probar un destino nuevo sin filtrar datos reales.
     destination = get_destination(state.destinations_conn, destination_id)
     if destination is None:
         raise APIError(404, "Not Found", f"destination '{destination_id}' no existe", error_code="destination_not_found")

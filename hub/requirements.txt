@@ -6,3 +6,10 @@ requests==2.32.3
 pydantic>=2
 fastapi>=0.115
 uvicorn>=0.30
+# Entrega 5 (spec/09 "Produccion"): secret manager (cifrado en reposo),
+# OIDC/SSO, OpenTelemetry Collector.
+cryptography>=42
+PyJWT[crypto]>=2.8
+opentelemetry-api>=1.24
+opentelemetry-sdk>=1.24
+opentelemetry-exporter-otlp-proto-http>=1.24

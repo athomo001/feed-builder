@@ -1,14 +1,14 @@
-"""Adaptador TXT compatible (spec/09-ROADMAP-ACCEPTANCE.md Entrega 2:
-"Adaptador TXT compatible"). Envuelve `hub/txt_feed.FeedWriterRegistry`
-(construido en Entrega 1) en el contrato de `hub/adapters/base.py`, con una
-carpeta propia por destino para que dos destinos `txt_feed` distintos
-(por ejemplo Fortinet y pfSense) no compartan archivos.
+"""Adaptador TXT compatible: envuelve `hub/txt_feed.FeedWriterRegistry` en el
+contrato de `hub/adapters/base.py`, con una carpeta propia por destino para
+que dos destinos `txt_feed` distintos (por ejemplo Fortinet y pfSense) no
+compartan archivos.
 
-Cubre los fabricantes `file_feed` con formato TXT plano ya soportado
-(spec/05 "Modos de entrega y esfuerzo relativo": Fortinet, Palo Alto EDL,
-Cisco Security Intelligence, pfSense/pfBlockerNG -- todos "un IOC por linea").
-Check Point necesita CSV multi-columna real, no una linea por valor: eso es
-`hub/adapters/csv_feed_adapter.py` (Entrega 4), no este adapter.
+Cubre los fabricantes con formato TXT plano ya soportado (Fortinet, Palo
+Alto EDL, Cisco Security Intelligence, pfSense/pfBlockerNG -- todos "un IOC
+por linea"). Check Point necesita CSV multi-columna real, no una linea por
+valor: eso es `hub/adapters/csv_feed_adapter.py`, no este adapter.
+
+Autor: Athan Espinoza
 """
 import os
 from typing import Optional
@@ -20,6 +20,9 @@ from hub.txt_feed import FeedWriterRegistry
 
 
 class TxtFeedAdapter:
+    # Un writer por subtype dentro de la carpeta del destino: asi un mismo
+    # destino puede recibir IOC de varias familias (ip/domain/hash) sin que
+    # terminen mezclados en el mismo archivo de salida.
     def __init__(self, destination: Destination, *, base_dir: str):
         self.destination = destination
         self.base_dir = os.path.join(base_dir, destination.destination_id)
@@ -43,6 +46,9 @@ class TxtFeedAdapter:
         }
 
     def send(self, rendered: dict, *, idempotency_key: Optional[str] = None) -> AdapterSendResult:
+        # rebuild_all() reescribe el archivo completo en vez de appendear:
+        # es lo que permite aplicar capacity/overflow_strategy (recortar a
+        # max_records_per_file) de forma consistente en cada escritura.
         writer = self.registry.get(rendered["subtype"])
         writer.upsert(rendered["value"], sort_key=rendered["sort_key"])
         results = self.registry.rebuild_all()
@@ -50,6 +56,9 @@ class TxtFeedAdapter:
         return AdapterSendResult(success=True, detail=f"written={written.written if written else 0}")
 
     def discard(self, event: CanonicalIOCEvent) -> AdapterSendResult:
+        # Mismo mecanismo de rebuild que send(): remove() solo saca el valor
+        # del set en memoria, el rebuild es lo que materializa el archivo sin
+        # ese valor.
         writer = self.registry.get(event.subtype)
         writer.remove(event.normalized_value)
         self.registry.rebuild_all()
@@ -59,6 +68,9 @@ class TxtFeedAdapter:
         return None
 
     def healthcheck(self) -> bool:
+        # Escribe y borra un archivo real en vez de solo chequear que la ruta
+        # existe: confirma permisos de escritura efectivos, que es la falla
+        # tipica en destinos file_feed (disco montado read-only, permisos).
         try:
             os.makedirs(self.base_dir, exist_ok=True)
             probe = os.path.join(self.base_dir, ".healthcheck")

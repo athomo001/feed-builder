@@ -1,63 +1,81 @@
-# Respaldo/plantilla del servicio feed-builder (ver README.md seccion 9).
-#
-# AUDITORIA.md P1: antes este archivo no era un Compose valido (le faltaba
-# la clave "services:"), asi que "docker compose -f feed-builder.yml config"
-# fallaba con "additional properties 'feed-builder' not allowed".
-#
-# Ahora es un Compose independiente y ejecutable:
+# Respaldo/plantilla de los servicios del Hub (ver README.md seccion 9).
+# Compose independiente y ejecutable:
 #   docker compose -f feed-builder.yml up -d
-# Requiere que la red "opencti-net" ya exista (la crea docker-compose.yml
-# principal); por eso se declara aqui como "external: true".
-#
-# Mantener sincronizado con el servicio feed-builder de docker-compose.yml
-# cuando cambien variables, volumenes o command.
+# Sirve para recuperar rapidamente estos dos servicios si el compose
+# principal (docker-compose.yml) se pierde o queda en mal estado --
+# mantener sincronizado con el cuando cambien variables, volumenes o
+# command de hub-service/hub-api.
 services:
-  feed-builder:
-    image: python:3.12-alpine
+  hub-service:
+    image: python:3.12-slim
     restart: always
-    # Nota: a diferencia del servicio dentro de docker-compose.yml, aqui no hay
-    # "depends_on: opencti" porque ese servicio no existe en este archivo
-    # standalone (docker compose no admite depender de un servicio externo al
-    # proyecto). El propio script reintenta la conexion SSE con backoff, asi
-    # que sobrevive a que OpenCTI todavia no este listo al arrancar.
     environment:
-      - OPENCTI_URL=http://opencti:8080
-      - OPENCTI_TOKEN=${OPENCTI_ADMIN_TOKEN}
-      - FEEDS_DIR=/feeds
-      - MIN_SCORE=50
-      - MIN_CONFIDENCE=50
-      - ALLOW_TLP=tlp:clear,tlp:green
-      - REQUIRE_DETECTION=false
-      - DEBUG_DUMP_ONCE=false
-      - STATS_EVERY_SEC=60
-      - PROCESS_OBSERVABLE_HASHES=true
-      - WRITE_INTERVAL_SEC=0
-      - HASH_ONLY_SHA256=true
-      - HASH_RELAX_FILTERS=true
-      - BACKFILL_ENABLED=true
-      - BACKFILL_DAYS=30
-      - BACKFILL_PAGE_SIZE=200
-      - BACKFILL_MAX_PAGES=50
-      - PUBLIC_FEEDS_BASE_URL=https://${PUBLIC_HOST}:${NGINX_HTTPS_PORT}/feeds
-      - STREAM_ID=
+      - OPENCTI_URL=${OPENCTI_URL}
+      - OPENCTI_SERVICE_ACCOUNT_TOKEN=${OPENCTI_SERVICE_ACCOUNT_TOKEN}
+      - OPENCTI_STREAM_ID=${OPENCTI_STREAM_ID}
+      - OPENCTI_TLS_VERIFY=${OPENCTI_TLS_VERIFY:-true}
+      - HUB_STATE_DIR=/state
+      - TXT_FEED_DIR=/feeds
+      - HUB_SOURCE_ID=${HUB_SOURCE_ID:-opencti-main}
     volumes:
-      - /opt/opencti/feed-builder:/app:ro
-      - /opt/opencti/feeds:/feeds
+      - ${HUB_APP_PATH}:/app:ro
+      - hub_state:/state
+      - hub_feeds:/feeds
+    working_dir: /app
     command: >
       sh -lc '
         set -eux;
-        pip install --no-cache-dir requests==2.32.3;
-        exec python -u /app/opencti_feed_builder.py
+        pip install --no-cache-dir -r hub/requirements.txt;
+        exec python -m hub.service
       '
     healthcheck:
-      test: ["CMD", "python", "/app/opencti_feed_builder.py", "--healthcheck"]
+      test: ["CMD", "python", "-m", "hub.service", "--healthcheck"]
       interval: 60s
       timeout: 10s
       retries: 3
-      start_period: 120s
+      start_period: 60s
     networks:
+      - hub-net
       - opencti-net
 
+  hub-api:
+    image: python:3.12-slim
+    restart: always
+    depends_on:
+      hub-service:
+        condition: service_started
+    environment:
+      - OPENCTI_URL=${OPENCTI_URL}
+      - OPENCTI_SERVICE_ACCOUNT_TOKEN=${OPENCTI_SERVICE_ACCOUNT_TOKEN}
+      - HUB_STATE_DIR=/state
+      - TXT_FEED_DIR=/feeds
+      - HUB_API_HOST=0.0.0.0
+      - HUB_API_PORT=8000
+      - ADMIN_UI_ORIGINS=${ADMIN_UI_ORIGINS}
+    volumes:
+      - ${HUB_APP_PATH}:/app:ro
+      - hub_state:/state
+      - hub_feeds:/feeds
+    working_dir: /app
+    command: >
+      sh -lc '
+        set -eux;
+        pip install --no-cache-dir -r hub/requirements.txt;
+        exec python -m hub.api
+      '
+    networks:
+      - hub-net
+
+volumes:
+  hub_state:
+  hub_feeds:
+
 networks:
+  hub-net:
+    driver: bridge
+  # Solo necesaria si el Hub esta co-ubicado en el mismo host que OpenCTI;
+  # si es remoto sobre HTTPS, borrar esta red de "networks:" en ambos
+  # servicios y de esta seccion.
   opencti-net:
     external: true
+    name: ${OPENCTI_DOCKER_NETWORK:-opencti-net}

@@ -1,8 +1,10 @@
-"""Formato de error RFC 9457 (spec/08-API-SECURITY.md "Formato de errores", Entrega 0).
+"""Formato de error RFC 9457.
 
 `detail` nunca debe contener secretos, stack traces ni payload completo;
 eso es responsabilidad de quien construye el ProblemDetail, no del modelo
-(el modelo solo define la forma del contrato, ver 08).
+(el modelo solo define la forma del contrato).
+
+Autor: Athan Espinoza
 """
 from typing import Optional
 

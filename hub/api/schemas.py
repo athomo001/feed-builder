@@ -1,12 +1,14 @@
-"""Modelos de request/response del Admin API (spec/08-API-SECURITY.md
-"Property-level / mass assignment (API3)": "los payloads de escritura se
-validan contra una allow-list explicita de campos por endpoint; campos no
-declarados o de solo lectura... se rechazan, nunca se asignan por
-deserializacion directa del body").
+"""Modelos de request/response del Admin API. Los payloads de escritura se
+validan contra una allow-list explicita de campos por endpoint: un campo no
+declarado o de solo lectura se rechaza, nunca se asigna por deserializacion
+directa del body -- esto es lo que previene mass assignment (un caller
+mandando `created_at` o `destination_id` en un update para pisar un campo
+que no deberia poder tocar).
 
 Todo modelo de REQUEST usa `extra="forbid"`: un campo no declarado aca
-(por ejemplo `destination_id`, `created_at` en un update) hace que FastAPI
-devuelva 422 en vez de asignarlo silenciosamente.
+hace que FastAPI devuelva 422 en vez de asignarlo silenciosamente.
+
+Autor: Athan Espinoza
 """
 from typing import Optional
 
@@ -17,6 +19,9 @@ from hub.policy_store import AllowedIOC
 
 
 class _Forbid(BaseModel):
+    # Base comun para no repetir `model_config = ConfigDict(extra="forbid")`
+    # en cada modelo de request; heredar de aca es lo que garantiza el
+    # comportamiento anti mass-assignment descripto arriba.
     model_config = ConfigDict(extra="forbid")
 
 
@@ -38,6 +43,10 @@ class DestinationCreate(_Forbid):
 
 
 class DestinationUpdate(_Forbid):
+    # Todos los campos son Optional (a diferencia de DestinationCreate): el
+    # router los aplica con `model_dump(exclude_unset=True)`, asi que un
+    # campo en None por default nunca se distingue de "no lo mande" y el
+    # update queda parcial, no reemplaza el destino entero.
     name: Optional[str] = None
     enabled: Optional[bool] = None
     endpoint: Optional[str] = None
@@ -80,3 +89,12 @@ class DiscardRequest(_Forbid):
 
 class DestinationTestRequest(_Forbid):
     allow_private_network: bool = False
+
+
+class SecretCreate(_Forbid):
+    name: str
+    value: str
+
+
+class RotateKeyRequest(_Forbid):
+    new_key: str

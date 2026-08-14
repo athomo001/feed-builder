@@ -1,15 +1,15 @@
-"""Auditoria de acciones de operadores (spec/07-ADMIN-UI-ANGULAR.md
-"Auditoria & Configuracion": "Registro historico de acciones de operadores
-(creacion de politicas, reintentos/descartes de DLQ, cambios de destino,
-rebobinado de cursor), buscable por usuario, accion, destino, politica,
-event_id, delivery_id y fecha"; spec/08-API-SECURITY.md "Auditoria": actor,
-accion, recurso, valores anteriores/nuevos sin secretos, motivo, resultado,
-correlation_id, timestamp).
+"""Registro historico de acciones de operadores (creacion de politicas,
+reintentos/descartes de DLQ, cambios de destino, rebobinado de cursor),
+buscable por actor, accion, recurso y fecha. Cada entrada guarda actor,
+accion, recurso, valores anteriores/nuevos, motivo, resultado,
+correlation_id y timestamp.
 
 `before`/`after` nunca deben llevar secretos: los recursos auditados en este
 proyecto (destinos, politicas, entregas) solo exponen `credential_ref`
 (una referencia, no el secreto en si -- ver hub/credentials.py), asi que no
 hace falta redaccion adicional aca.
+
+Autor: Athan Espinoza
 """
 import json
 import sqlite3
@@ -85,6 +85,9 @@ def _row_to_entry(row) -> AuditEntry:
 
 
 def record(
+    # `audit_id` se genera aca (uuid4) en vez de dejar que SQLite lo asigne,
+    # para poder devolverselo al caller (y usarlo como resource_id de logs
+    # relacionados) sin necesitar una segunda consulta tras el INSERT.
     conn: sqlite3.Connection,
     *,
     actor_token_id: Optional[str],
@@ -146,6 +149,10 @@ def list_audit(
     limit: int = 50,
     offset: int = 0,
 ) -> list[AuditEntry]:
+    # Se arma el WHERE dinamicamente en vez de tener una query fija: todos
+    # los filtros son opcionales y se pueden combinar libremente, asi que
+    # una sola query con clausulas condicionales cubre cualquier combinacion
+    # sin necesitar una variante SQL por cada subconjunto de filtros.
     clauses, params = [], []
     if actor_token_id is not None:
         clauses.append("actor_token_id = ?")

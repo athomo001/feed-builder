@@ -1,9 +1,8 @@
-"""API tokens locales (spec/08-API-SECURITY.md "Autenticacion": "API tokens
-separados para automatizacion, con hash en base de datos, expiracion,
-scopes y rotacion"). Decision de la Entrega 2 (spec/09 decision #5): sin
-OIDC/SSO todavia, sin usuario/contrasena local -- eso queda para cuando
-exista la consola Angular real (Entrega 3) o un proveedor corporativo
-confirmado.
+"""API tokens locales: tokens separados para automatizacion, con hash en
+base de datos, expiracion, scopes y rotacion. Se eligio este esquema en vez
+de OIDC/SSO o usuario/contrasena local porque hoy no hay una consola web
+real ni un proveedor corporativo confirmado contra el cual autenticar --
+un token opaco por cliente es lo minimo que cubre el caso de uso actual.
 
 El token en claro se genera con `secrets.token_urlsafe` (alta entropia) y
 se devuelve UNA sola vez al crearlo; solo su hash SHA-256 se persiste. A
@@ -11,6 +10,8 @@ diferencia de una contrasena elegida por un humano, un token de 256 bits de
 entropia no necesita Argon2id (ese costo es para resistir fuerza bruta
 offline sobre secretos de baja entropia; aqui el hash solo protege contra
 una fuga de la base, no contra adivinar el token).
+
+Autor: Athan Espinoza
 """
 import hashlib
 import json
@@ -23,12 +24,16 @@ from pydantic import BaseModel, Field
 
 Role = Literal["viewer", "operator", "policy-admin", "security-admin"]
 
-# spec/08 "Roles locales": cada rol de mayor privilegio cubre las acciones
-# del anterior (jerarquia simple, no matriz de permisos independiente).
+# Jerarquia simple en vez de una matriz de permisos independiente: cada rol
+# de mayor privilegio cubre automaticamente las acciones del anterior, asi
+# que no hace falta mantener una lista de permisos por rol.
 _ROLE_RANK = {"viewer": 0, "operator": 1, "policy-admin": 2, "security-admin": 3}
 
 
 def role_satisfies(actual: str, required: str) -> bool:
+    # Un rol desconocido rankea -1 (nunca satisface nada) y un requisito
+    # desconocido rankea 99 (nunca se satisface): fail-closed ante un typo
+    # de rol en vez de dejarlo pasar por comparacion accidental.
     return _ROLE_RANK.get(actual, -1) >= _ROLE_RANK.get(required, 99)
 
 
@@ -117,6 +122,9 @@ _COLUMNS = "token_id, token_hash, role, scopes, created_at, expires_at, revoked"
 
 
 def verify_token(conn: sqlite3.Connection, plaintext: str, *, now: Optional[datetime] = None) -> Optional[APIToken]:
+    # Se busca por hash, nunca comparando el plaintext contra valores en
+    # memoria: la base solo guarda hashes, asi que esta consulta es la unica
+    # forma de verificar un token sin tener que traer todas las filas.
     now = now or datetime.now(timezone.utc)
     row = conn.execute(
         f"SELECT {_COLUMNS} FROM api_tokens WHERE token_hash = ?", (_hash_token(plaintext),)
@@ -124,6 +132,9 @@ def verify_token(conn: sqlite3.Connection, plaintext: str, *, now: Optional[date
     if row is None:
         return None
     token = _row_to_token(row)
+    # Revocado o expirado se tratan igual que "no existe" (None) en vez de
+    # devolver el token con un flag: el caller (auth) no deberia tener que
+    # acordarse de chequear revoked/expires_at el mismo, solo confiar en None.
     if token.revoked:
         return None
     if token.expires_at is not None and token.expires_at < now:

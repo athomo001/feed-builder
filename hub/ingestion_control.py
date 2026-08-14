@@ -1,11 +1,14 @@
-"""Control de ingestion cross-proceso (spec/07-ADMIN-UI-ANGULAR.md "OpenCTI /
-Ingesta": "pausar ingesta e iniciar reconciliacion... rebobinar/re-sincronizar").
+"""Control de ingestion cross-proceso: permite pausar la ingesta, pedir una
+reconciliacion o rebobinar/re-sincronizar el cursor desde afuera del
+proceso que la ejecuta.
 
 `hub.service` (ingestion) y `hub.api` (Admin API) son procesos separados sin
 comunicacion directa entre si. En vez de IPC, la API escribe una fila de
 control en SQLite que `hub.service.listen_live_stream` sondea en su loop --
 mismo principio que ya usan `hub/cursor_store.py`/`hub/ledger.py` para
 compartir estado durable entre reinicios, aplicado aca entre procesos.
+
+Autor: Athan Espinoza
 """
 import sqlite3
 from datetime import datetime, timezone
@@ -57,8 +60,8 @@ def _row_to_control(row) -> IngestionControl:
 
 def get_control(conn: sqlite3.Connection, source_id: str) -> IngestionControl:
     """Siempre devuelve un control valido: si no existe fila todavia, el
-    default es 'sin pausar, sin pedidos pendientes' (spec: el sistema arranca
-    operativo, no pausado)."""
+    default es 'sin pausar, sin pedidos pendientes', porque el sistema debe
+    arrancar operativo en vez de requerir una fila de configuracion previa."""
     row = conn.execute(f"SELECT {_COLUMNS} FROM ingestion_control WHERE source_id = ?", (source_id,)).fetchone()
     if row is None:
         return IngestionControl(source_id=source_id, updated_at=datetime.now(timezone.utc))
@@ -66,6 +69,10 @@ def get_control(conn: sqlite3.Connection, source_id: str) -> IngestionControl:
 
 
 def _upsert(conn: sqlite3.Connection, control: IngestionControl) -> None:
+    # Unica ruta de escritura para toda la tabla: cada funcion set_*/request_*
+    # de abajo lee el control actual, aplica su cambio puntual con
+    # `model_copy` y reescribe la fila completa aqui, en vez de tener un
+    # UPDATE parcial distinto por campo.
     conn.execute(
         f"""
         INSERT INTO ingestion_control ({_COLUMNS})

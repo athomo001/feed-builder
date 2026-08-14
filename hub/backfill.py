@@ -1,5 +1,8 @@
-"""Backfill inicial via GraphQL (spec/02-OPENCTI-COMPATIBILITY.md "Backfill":
-paginacion por cursor, ventana temporal, paginas limitadas, cancelable).
+"""Backfill inicial via GraphQL: recorre el catalogo de indicadores paginando
+por cursor, acotado a una ventana temporal, con paginas limitadas y
+cancelable a mitad de camino.
+
+Autor: Athan Espinoza
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,8 +38,9 @@ def run_backfill(
 ) -> BackfillResult:
     """Recorre `indicators` ordenado por modified desc, mas nuevo primero, y
     corta cuando: se agotan paginas, se llega a `since`, `should_stop()` es
-    True, o se alcanza `max_pages` (spec/02 "Limitar paginas, tamano de
-    pagina y ventana temporal", "Permitir cancelar o pausar")."""
+    True, o se alcanza `max_pages`. Ordenar por mas reciente primero permite
+    cortar apenas se cruza la ventana `since` sin recorrer el catalogo
+    completo."""
     result = BackfillResult()
     cursor = None
 
@@ -78,6 +82,10 @@ def run_backfill(
         cursor = end_cursor
         result.last_cursor = cursor
     else:
+        # El `else` de este `while` solo corre si el ciclo termina porque la
+        # condicion se volvio falsa (se agoto `max_pages`), no si termino por
+        # un `break` en otra rama: es la forma idiomatica de Python de
+        # distinguir "se acabaron las paginas permitidas" de las demas salidas.
         result.stopped_reason = "max_pages"
 
     return result

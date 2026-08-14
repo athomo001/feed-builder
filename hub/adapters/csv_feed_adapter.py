@@ -1,18 +1,19 @@
-"""Adaptador CSV multi-columna (spec/09-ROADMAP-ACCEPTANCE.md Entrega 4
-"Integraciones", bajo esfuerzo: Check Point Custom Intelligence Feed).
+"""Adaptador CSV multi-columna (pensado para Check Point Custom Intelligence
+Feed).
 
 A diferencia de `TxtFeedAdapter` (una linea = un valor crudo), cada linea es
-una fila CSV con columnas configurables (spec/05-FORMATS-DESTINATIONS.md
-"CSV": "Columnas configurables... Separador, quoting, encoding y header
-configurables... Proteccion contra CSV injection en campos textuales...
-Columnas minimas recomendadas: family, subtype, value, score, confidence,
-marking, created_at, valid_until").
+una fila CSV con columnas configurables: separador, quoting, encoding y
+header configurables, y proteccion contra CSV injection en campos
+textuales.
 
-Check Point no tiene un esquema de columnas confirmado contra un parser real
-(spec/05 lo deja como "decision de implementacion" -- no hay tope de
-registros ni nombre de columna documentado por el fabricante); se usan las
-columnas recomendadas genericas de 05 como default, configurables por
-destino via `format_options.columns`.
+Check Point no tiene un esquema de columnas confirmado contra un parser
+real -- no hay tope de registros ni nombre de columna documentado por el
+fabricante -- asi que se usa un set generico de columnas recomendadas
+(family, subtype, value, score, confidence, marking, created_at,
+valid_until) como default, configurables por destino via
+`format_options.columns`.
+
+Autor: Athan Espinoza
 """
 import csv
 import io
@@ -24,13 +25,18 @@ from hub.destinations_store import Destination
 from hub.models import CanonicalIOCEvent
 from hub.txt_feed import FeedWriterRegistry
 
+# Set generico usado cuando el destino no especifica format_options.columns
+# (ver rationale en el docstring del modulo).
 DEFAULT_COLUMNS = ["family", "subtype", "value", "score", "confidence", "marking", "created_at", "valid_until"]
 
-# spec/05 "Proteccion contra CSV injection": un campo que empieza con
-# =, +, - o @ puede ejecutarse como formula al abrir el CSV en Excel/Sheets.
+# Proteccion contra CSV injection: un campo que empieza con =, +, - o @ puede
+# ejecutarse como formula al abrir el CSV en Excel/Sheets.
 _INJECTION_PREFIXES = ("=", "+", "-", "@")
 
 
+# Antepone un apostrofe a valores que empiezan con un prefijo de formula:
+# Excel/Sheets tratan la celda como texto literal en vez de evaluarla,
+# neutralizando el ataque sin cambiar el valor visible para un humano.
 def _sanitize_cell(value) -> str:
     text = "" if value is None else str(value)
     if text and text[0] in _INJECTION_PREFIXES:
@@ -60,6 +66,8 @@ class CsvFeedAdapter:
         )
 
     def _render_line(self, value: str, _sort_key: float, meta: dict) -> str:
+        # "marking" no viene directo en meta (es una lista de TLP/markings),
+        # asi que se junta a proposito antes de sanitizar/escribir la celda.
         row = []
         for column in self.columns:
             if column == "value":
@@ -73,6 +81,10 @@ class CsvFeedAdapter:
         return buf.getvalue().rstrip("\n")
 
     def _parse_line(self, line: str) -> Optional[str]:
+        # Usado por FeedWriterRegistry al recargar el archivo existente en
+        # memoria (por ejemplo tras un reinicio): reconstruye el valor crudo
+        # a partir de una fila ya escrita, incluyendo revertir el escape de
+        # _sanitize_cell para no dejar el apostrofe pegado al valor.
         if self.include_header and line == self.delimiter.join(self.columns):
             return None
         if "value" not in self.columns:
@@ -128,6 +140,9 @@ class CsvFeedAdapter:
         return None
 
     def healthcheck(self) -> bool:
+        # Escribe y borra un archivo real (no solo revisa que la carpeta
+        # exista) para detectar problemas de permisos/disco read-only antes
+        # de que fallen en un send() real.
         try:
             os.makedirs(self.base_dir, exist_ok=True)
             probe = os.path.join(self.base_dir, ".healthcheck")

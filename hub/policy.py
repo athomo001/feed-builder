@@ -1,9 +1,8 @@
-"""Contrato de decisiones de politica (Entrega 0).
+"""Contrato de decisiones de politica: el motor de politicas evalua
+politicas inmutables por version y devuelve accepted/rejected/skipped/
+revoked mas un codigo de razon concreto.
 
-spec/03-ARCHITECTURE.md "Policy engine": evalua politicas inmutables por
-version y devuelve accepted/rejected/skipped/revoked mas codigo de razon.
-spec/04-IOC-MODEL-POLICIES.md "Filtros de seguridad" y "Politica de
-duplicados" enumeran las razones concretas.
+Autor: Athan Espinoza
 """
 from enum import Enum
 
@@ -20,7 +19,7 @@ class PolicyOutcome(str, Enum):
 class ReasonCode(str, Enum):
     OK = "ok"
 
-    # spec/04 "Filtros de seguridad"
+    # Razones de rechazo por filtros de seguridad basicos del IOC.
     REVOKED = "revoked"
     EXPIRED = "expired"
     TLP_NOT_ALLOWED = "tlp_not_allowed"
@@ -30,17 +29,18 @@ class ReasonCode(str, Enum):
     UNCLASSIFIED = "unclassified"
     SUBTYPE_NOT_ALLOWED = "subtype_not_allowed"
 
-    # spec/04 "Politica de duplicados"
+    # Razones relacionadas con deduplicacion/reenvio del mismo IOC.
     DUPLICATE_EVENT = "duplicate_event"
     DUPLICATE_CONTENT = "duplicate_content"
     ALREADY_DELIVERED = "already_delivered"
     SAME_VALUE_NEW_VERSION = "same_value_new_version"
 
-    # spec/04 "Capacidad y throughput por destino"
+    # Omitido por limite de capacidad/throughput del destino, no por una
+    # regla de contenido.
     SKIPPED_CAPACITY = "skipped_capacity"
 
-    # spec/06 "DLQ": descartar con motivo obligatorio, distinto de un rechazo
-    # de politica -- lo decide un operador, no el motor.
+    # Descartado con motivo obligatorio: a diferencia de un rechazo de
+    # politica, esta decision la toma un operador humano, no el motor de reglas.
     DISCARDED = "discarded"
 
 

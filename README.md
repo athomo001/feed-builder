@@ -1,68 +1,50 @@
 # Feed Builder para OpenCTI
 
-**Autor:** Athan Espinoza
+```bash
+!! Esto esta en beta - si que manejese con cuidado - no hay garantias de nada, ni de tu vida como lector como la mia
+```
 
 > Historial de cambios por versión en [CHANGELOG.md](CHANGELOG.md). Versión actual del Hub: `hub.__version__` (ver [hub/\_\_init\_\_.py](hub/__init__.py)).
 >
-> Este README documenta el script legado `opencti_feed_builder.py`, hoy en producción. El rediseño en curso (`hub/`, "OpenCTI IOC Distribution Hub") sigue la especificación modular en [spec/](spec/README.md); ver la sección [13) Hub - rediseno (Entrega 1)](#13-hub---rediseno-entrega-1) más abajo para instalarlo y probarlo.
+> `docker-compose.yml`, `feed-builder.yml`, `nginx.conf` y `.env`/`.env.example` en la raíz del repo despliegan **solo el Hub** (`hub/`, "OpenCTI IOC Distribution Hub", secciones 13 en adelante) — asumen una instancia de OpenCTI ya desplegada por separado, no la levantan. Las secciones 6, 7 y 8 de abajo documentan el script legado `opencti_feed_builder.py` (todavía presente en el repo como referencia histórica) tal como funciona en el código, pero **no** es lo que el `docker-compose.yml` actual despliega.
 
 ## 1) Objetivo del proyecto
 
-Este proyecto implementa un servicio llamado Feed Builder integrado a OpenCTI para automatizar la publicacion de indicadores de compromiso (IOC) consumibles por firewalls y otras herramientas de seguridad.
+Este proyecto es el Hub de distribución de IOC (`hub/`, "OpenCTI IOC Distribution Hub"): una integración *sobre* una instancia de OpenCTI ya desplegada, no un despliegue de OpenCTI en sí. Se conecta al Live Stream (SSE) de OpenCTI, aplica políticas de filtrado configurables por destino, y distribuye los IOC resultantes en el formato que cada destino necesita (TXT/CIDR, CSV, RouterOS `.rsc`, CDB de Wazuh, JSON push, STIX 2.1, TAXII 2.1) — ver secciones 13 en adelante para el detalle completo por Entrega, y `spec/` para la especificación.
 
-El servicio:
-
-- Se conecta al Live Stream (SSE) de OpenCTI.
-- Filtra indicadores por calidad (score, confianza, TLP, vigencia y TTL).
-- Genera feeds en texto plano (un IOC por linea):
-  - ip.txt
-  - url.txt
-  - hash.txt
-- Publica los feeds por HTTPS a traves de Nginx.
-
-Rutas esperadas de consumo:
-
-- https://opencti.example.local:8446/feeds/ip.txt
-- https://opencti.example.local:8446/feeds/url.txt
-- https://opencti.example.local:8446/feeds/hash.txt
+El script legado `opencti_feed_builder.py` (secciones 6-8 más abajo) era la primera versión de esta idea, ya reemplazada por `hub/`; se mantiene en el repo solo como referencia histórica, no se despliega desde `docker-compose.yml`.
 
 ## 2) Que contiene este repositorio
 
-- docker-compose.yml
-  - Stack principal OpenCTI + conectores + Nginx + feed-builder.
-- feed-builder.yml
-  - Respaldo/plantilla del servicio feed-builder (bloque standalone para referencia o recuperacion).
-- nginx.conf
-  - Reverse proxy HTTPS para OpenCTI y publicacion de /feeds/*.txt.
-- opencti_feed_builder.py
-  - Script Python que consume stream, filtra IOC y construye feeds.
+- `docker-compose.yml`
+  - Despliega el Hub (`hub-service`, `hub-api`, `nginx`) contra una instancia de OpenCTI externa. No incluye OpenCTI, sus conectores ni su base de datos/cola/búsqueda — eso corre aparte.
+- `feed-builder.yml`
+  - Respaldo/plantilla de `hub-service`/`hub-api`, para recuperar rápido esos dos servicios si el compose principal se pierde (ver sección 9).
+- `nginx.conf`
+  - Ingress propio del Hub: TLS, reverse proxy a `hub-api` (Admin API, TAXII, healthchecks), UI Angular estática y publicación de `/feeds/*`.
+- `opencti_feed_builder.py`
+  - Script legado, ya reemplazado por `hub/` (ver arriba). Las secciones 6-8 documentan cómo funciona ese script puntualmente.
 
 ## 3) Arquitectura y flujo
 
-1. OpenCTI recibe/normaliza inteligencia desde conectores.
-2. feed-builder escucha eventos SSE desde OpenCTI (/stream o /stream/{id}).
-3. El script interpreta eventos STIX (indicator y observables).
-4. Aplica politicas de filtrado.
-5. Encola o escribe IOC en feeds segun modo (batch/inmediato).
-6. Nginx sirve /feeds/ip.txt, /feeds/url.txt y /feeds/hash.txt por HTTPS.
+Ver secciones 13 en adelante para la arquitectura real y vigente del Hub (`hub/`). Resumen: OpenCTI Live Stream → `hub.service` (ingesta, normalización, políticas) → Delivery Adapters/Feeds materializados → Event Ledger; `hub.api` expone la Admin API y sirve a la UI Angular. La sección 3 original describía el flujo del script legado `opencti_feed_builder.py` (sección 6 abajo tiene el detalle completo de ese script específico).
 
 ## 4) Requisitos para funcionar
 
 ## 4.1 Infraestructura y sistema
 
 - Docker Engine + Docker Compose.
-- Volumenes/rutas de host disponibles para:
-  - /opt/opencti/feed-builder (codigo Python)
-  - /opt/opencti/feeds (salida de feeds y state.json)
-  - /opt/opencti/nginx.conf
-  - /opt/opencti/certs (certificado y llave TLS)
-- Acceso de red entre contenedores en la red opencti-net.
+- Una instancia de OpenCTI ya desplegada y accesible (por `OPENCTI_URL`), con un token de cuenta de servicio no administrativa.
+- Volúmenes/rutas de host disponibles para (ver `.env.example`):
+  - `HUB_APP_PATH` (código del repo, con `hub/`)
+  - `UI_DIST_PATH` (salida de `ng build`, ver sección 15.2)
+  - `NGINX_CONF_PATH`, `NGINX_CERTS_PATH` (certificado y llave TLS)
+- Si el Hub está co-ubicado con OpenCTI en el mismo host: acceso a la red Docker externa de OpenCTI (`OPENCTI_DOCKER_NETWORK`). Si es remoto: solo necesita alcanzar `OPENCTI_URL` por HTTPS.
 
 ## 4.2 Requisitos de OpenCTI
 
-- OpenCTI arriba y saludable.
-- Token valido de OpenCTI con permisos para stream y GraphQL.
-- Servicio opencti resolvible como http://opencti:8080 dentro de la red Docker.
+- OpenCTI arriba y saludable, gestionado por fuera de este repositorio.
+- Token de cuenta de servicio (no administrativa) con permisos de stream y GraphQL — ver sección 13.2.
 
 ## 4.3 Requisitos de Nginx
 
@@ -74,31 +56,34 @@ Rutas esperadas de consumo:
 
 ## 5) Puesta en marcha
 
-1. Revisar variables en .env (credenciales, rutas, limites de recursos, token OpenCTI).
-2. Verificar que las rutas de host usadas en volumenes existan y tengan permisos.
-3. Levantar stack:
+1. Confirmar que OpenCTI ya está arriba y accesible desde donde se va a correr este compose.
+2. Copiar `.env.example` a `.env` y completar valores reales (`OPENCTI_URL`, `OPENCTI_SERVICE_ACCOUNT_TOKEN`, rutas de host, `PUBLIC_HOST`).
+3. Verificar que las rutas de host usadas en volúmenes existan y tengan permisos.
+4. Levantar el Hub:
 
 ```bash
 docker compose up -d
 ```
 
-4. Validar estado:
+5. Validar estado:
 
 ```bash
 docker compose ps
-docker compose logs -f feed-builder
+docker compose logs -f hub-service
+docker compose logs -f hub-api
 docker compose logs -f nginx
 ```
 
-5. Probar feeds desde red interna:
+6. Probar la Admin API y los feeds desde red interna:
 
 ```bash
-curl -k https://opencti.example.local:8446/feeds/ip.txt
-curl -k https://opencti.example.local:8446/feeds/url.txt
-curl -k https://opencti.example.local:8446/feeds/hash.txt
+curl -k https://$PUBLIC_HOST:$NGINX_HTTPS_PORT/healthz/liveness
+curl -k https://$PUBLIC_HOST:$NGINX_HTTPS_PORT/feeds/<destino>/<subtipo>.txt
 ```
 
-## 6) Como funciona el script opencti_feed_builder.py
+## 6) Como funciona el script opencti_feed_builder.py (legado, referencia histórica)
+
+> Esta sección documenta el comportamiento del archivo `opencti_feed_builder.py` tal como está escrito en el repo. Ya no se despliega desde `docker-compose.yml` (reemplazado por `hub/`, secciones 13 en adelante) — queda como referencia de cómo funcionaba la primera versión.
 
 ## 6.1 Inicializacion
 
@@ -248,62 +233,59 @@ Nota importante:
 
 En este repositorio hay dos piezas relacionadas:
 
-- docker-compose.yml:
-  - Archivo principal y completo del entorno.
-- feed-builder.yml:
-  - Respaldo/plantilla del servicio feed-builder.
-  - Sirve para recuperar rapidamente el bloque del servicio en caso de cambios o perdida en el compose principal.
+- `docker-compose.yml`:
+  - Archivo principal: `hub-service`, `hub-api` y `nginx`.
+- `feed-builder.yml`:
+  - Respaldo/plantilla de `hub-service`/`hub-api` (no incluye `nginx`).
+  - Sirve para recuperar rápidamente esos dos servicios en caso de cambios o pérdida en el compose principal: `docker compose -f feed-builder.yml up -d`.
 
-Practica recomendada:
+Práctica recomendada:
 
-- Mantener ambos sincronizados cuando se cambian variables, volumenes o command del feed-builder.
+- Mantener ambos sincronizados cuando se cambian variables, volúmenes o command de `hub-service`/`hub-api`.
 
 ## 10) Operacion y troubleshooting
 
 ## 10.1 Comandos utiles
 
 ```bash
-docker compose logs -f feed-builder
+docker compose logs -f hub-service
+docker compose logs -f hub-api
 docker compose logs -f nginx
-docker compose restart feed-builder
+docker compose restart hub-service
+docker compose restart hub-api
 docker compose restart nginx
 ```
 
 ## 10.2 Problemas comunes
 
-1. 401 Unauthorized en stream:
-   - Token OPENCTI_TOKEN invalido o sin permisos.
+1. 401 en el stream de OpenCTI:
+   - `OPENCTI_SERVICE_ACCOUNT_TOKEN` inválido, revocado o sin permisos de stream/GraphQL.
 
-2. Feeds vacios:
-   - No hay eventos que cumplan filtros.
-   - Umbrales demasiado altos (score/confidence).
-   - TLP no permitido.
-   - TTL demasiado estricto.
+2. Feeds vacíos:
+   - No hay eventos que cumplan la política publicada del destino (ver sección 14).
+   - No hay ninguna política publicada para ese destino (spec/08: sin política publicada, el destino no recibe entregas).
 
-3. Nginx responde 404 en /feeds/*:
-   - Volumen de feeds mal montado.
-   - FEEDS_DIR del contenedor y path servido por Nginx no coinciden.
+3. Nginx responde 404 en `/feeds/*`:
+   - Volumen `hub_feeds` mal montado, o el destino/subtipo pedido todavía no generó ningún archivo.
 
 4. Problemas TLS:
-   - Certificado/llave no encontrados o no coinciden con server_name/IP.
+   - Certificado/llave no encontrados o no coinciden con `server_name`/`PUBLIC_HOST`.
 
 5. Reconexiones frecuentes del stream:
-   - Inestabilidad de red o de OpenCTI.
-   - Revisar salud de opencti y latencia entre contenedores.
+   - Inestabilidad de red hacia OpenCTI, o `OPENCTI_URL` apuntando a un host/puerto incorrecto.
+   - `hub-service` reconecta solo con backoff (ver `docs/RUNBOOK.md` sección 2); revisar `GET /admin/api/v1/ingestion/status`.
 
 ## 11) Seguridad y buenas practicas
 
-- No versionar ni compartir el archivo .env con secretos reales.
-- Rotar credenciales expuestas historicamente (tokens, API keys, passwords).
-- Restringir acceso a puerto 8446 solo a equipos autorizados.
-- Asegurar permisos de solo lectura para codigo montado en /app cuando aplique.
-- Monitorear tamano de /opt/opencti/feeds y crecimiento de state.json.
+- No versionar ni compartir el archivo `.env` con secretos reales (ver `.gitignore`).
+- Rotar credenciales expuestas historicamente (tokens, API keys, passwords) — para la clave de cifrado de secretos del Hub ver `docs/RUNBOOK.md` sección 3.
+- Restringir acceso al puerto HTTPS publicado (`NGINX_HTTPS_PORT`) solo a equipos autorizados.
+- Asegurar permisos de solo lectura para el código montado en `/app` (ya declarado `:ro` en `docker-compose.yml`).
+- Monitorear el tamaño del volumen `hub_feeds` y de las bases SQLite en `hub_state`.
 
 ## 12) Estado funcional actual
 
-- Implementacion en marcha blanca (desarrollo personalizado).
-- Flujo end-to-end operativo: OpenCTI stream -> filtro -> txt -> Nginx HTTPS.
-- Hay espacio de mejora para alinear completamente el comportamiento con algunas variables de compose no usadas todavia (MAX_RECORDS_PER_FEED, URL_STRIP_SCHEME, URL_KEEP_QUERY).
+Ver [spec/PROJECT-MAP.md](spec/PROJECT-MAP.md) para el estado componente por componente y sus huecos conocidos documentados, y las secciones 13 a 17 de este README para instalar/probar cada Entrega. El flujo descrito en la sección 6 (OpenCTI stream -> filtro -> TXT -> Nginx) corresponde al script legado `opencti_feed_builder.py`, ya reemplazado por `hub/`.
 
 ## 13) Hub - rediseno (Entrega 1)
 
@@ -572,3 +554,78 @@ curl -s -X POST http://localhost:8000/admin/api/v1/alerts/{alert_id}/acknowledge
 ### 16.5 Limites conocidos
 
 Ver "Pendiente conocido: Entrega 4 (Integraciones)" en [spec/PROJECT-MAP.md](spec/PROJECT-MAP.md): sin archivo historico de IOC (fuera de alcance de esta entrega), sin cola/workers real, SLO de latencia por destino sigue como umbral unico a nivel Hub (no por destino), 6 de las 11 condiciones de alerta de spec/06 sin señal disponible (espacio en disco, TLS invalido, caida de volumen historico, entre otras), QRadar y TAXII sin validar contra una instancia/consumidor real, y Check Point/MikroTik/Wazuh sin confirmar el esquema exacto que espera el parser real de cada fabricante (spec/05 lo deja como decision de implementacion).
+
+## 17) Produccion - Entrega 5
+
+spec/09-ROADMAP-ACCEPTANCE.md "Entrega 5": PostgreSQL, OIDC/SSO y RBAC, secret manager, OpenTelemetry Collector, endurecimiento de produccion (load test, chaos/recovery, backup/restore, rotacion). Decisiones fijadas: PostgreSQL solo se documenta el camino de migracion (sin codigo esta pasada, ver spec/PROJECT-MAP.md "Pendiente conocido: Entrega 5"); OIDC generico probado contra un IdP simulado, no uno real; secret manager como cifrado en reposo, no una integracion externa.
+
+### 17.1 Secret manager (cifrado en reposo)
+
+```bash
+# Generar una clave nueva (una sola vez, guardarla fuera del repo/backups)
+python -c "from hub.secret_encryption import SecretCipher; print(SecretCipher.generate_key())"
+
+# Variables de entorno (una de las dos, nunca ambas necesarias)
+SECRET_ENCRYPTION_KEY=<clave-generada-arriba>
+SECRET_ENCRYPTION_KEY_FILE=/ruta/a/un/archivo/con/la/clave   # alternativa, ej. secret montado por el orquestador
+
+TOKEN=... # rol security-admin
+
+# Guardar un secreto (el valor nunca se devuelve ni se audita despues de este POST)
+curl -s -X POST http://localhost:8000/admin/api/v1/secrets \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name": "qradar-token", "value": "el-token-real-de-qradar"}'
+
+curl -s http://localhost:8000/admin/api/v1/secrets -H "Authorization: Bearer $TOKEN"           # solo nombres
+curl -s -X POST http://localhost:8000/admin/api/v1/secrets/qradar-token/test -H "Authorization: Bearer $TOKEN"  # descifra y confirma, sin exponer el valor
+curl -s -X DELETE http://localhost:8000/admin/api/v1/secrets/qradar-token -H "Authorization: Bearer $TOKEN"
+```
+
+Cualquier `credential_ref` (destinos, alertas, el `client_secret` de OIDC) acepta `secret://<name>` ademas de `env://NAME` de siempre -- mismo punto unico de resolucion (`hub/credentials.py`). Rotacion de la clave: ver `docs/RUNBOOK.md` seccion 3 (`POST /admin/api/v1/secrets/rotate-key`).
+
+### 17.2 OIDC/SSO
+
+```bash
+OIDC_ISSUER_URL=https://idp.example.com/realms/hub          # IdP con descubrimiento OIDC estandar
+OIDC_CLIENT_ID=hub-admin-ui
+OIDC_CLIENT_SECRET_REF=secret://oidc-client-secret            # o env://OIDC_CLIENT_SECRET
+OIDC_REDIRECT_URI=https://hub.example.com/admin/api/v1/auth/oidc/callback
+OIDC_ROLE_CLAIM=roles                                          # nombre del claim del ID token con el/los rol(es)
+OIDC_ROLE_MAPPING={"hub-security-admins": "security-admin", "hub-operators": "operator"}
+OIDC_SESSION_TTL_SECONDS=28800
+```
+
+La UI muestra un boton "Entrar con SSO" en `/login` (navegacion de pagina completa a `/admin/api/v1/auth/oidc/login`, no una ruta Angular -- el redirect a un IdP externo y de vuelta necesita una recarga real del navegador). La sesion viaja en una cookie `hub_session` HttpOnly+Secure+SameSite=Lax (nunca visible a JS, a diferencia del token pegado de Entrega 2 que vive en memoria); `GET /admin/api/v1/auth/whoami` la detecta al arrancar la app. `POST /admin/api/v1/auth/logout` la revoca. Los API tokens de Entrega 2 (`README.md §14.2`) siguen funcionando sin cambios para automatizacion.
+
+**No validado contra un IdP real** (Keycloak/Okta/Azure AD) -- los tests usan un IdP simulado con un keypair RSA propio. Antes de un despliegue real, probar el flujo completo contra el IdP corporativo elegido.
+
+### 17.3 OpenTelemetry
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318   # sin esto, no se instala ningun exporter (aditivo/opcional)
+OTEL_SERVICE_NAME=opencti-ioc-hub
+```
+
+Config de ejemplo del Collector en [deploy/otel-collector-config.yaml](deploy/otel-collector-config.yaml) (incluye un processor que filtra atributos con pinta de secreto antes de exportar). Los 7 spans de spec/06 seccion 4 (`opencti.stream.receive`, `opencti.event.normalize`, `policy.evaluate`, `delivery.render`/`.send`/`.acknowledge`, `feed.rebuild`) ya estan instrumentados en el codigo -- sin `OTEL_EXPORTER_OTLP_ENDPOINT` configurado, el Hub sigue funcionando igual (spec/06: "Prometheus, OpenTelemetry... quedan como salidas opcionales").
+
+### 17.4 Endurecimiento de produccion
+
+```bash
+# Backup / restore -- ver docs/RUNBOOK.md para el procedimiento completo
+python scripts/backup_state.py --state-dir "$HUB_STATE_DIR" --feed-dir "$TXT_FEED_DIR" --out-dir ./backups
+python scripts/restore_state.py hub-backup-20260814T120000Z.tar.gz --state-dir ./state --feed-dir ./feeds
+
+# Load test simple (sin dependencia nueva)
+python scripts/load_test.py --base-url http://localhost:8000/admin/api/v1 \
+  --token "$TOKEN" --endpoint /destinations --requests 200 --concurrency 20
+```
+
+Ver [docs/RUNBOOK.md](docs/RUNBOOK.md) para el procedimiento completo (backup/restore con prueba mensual, recuperacion ante caida de OpenCTI, rotacion de la clave de secretos, recuperacion de dead-letter). Caida de OpenCTI cubierta por un chaos test (`tests/hub/test_chaos_opencti_outage.py`) contra el backoff/reconexion ya construido desde Entrega 1.
+
+### 17.5 Migracion a PostgreSQL (solo documentada, sin construir)
+
+Ver "Pendiente conocido: Entrega 5" en [spec/PROJECT-MAP.md](spec/PROJECT-MAP.md): ruta recomendada, orden sugerido de migracion de los 12 modulos `hub/*_store.py`, y el disparador documentado en spec/06 ("PostgreSQL para produccion multi-worker"). Sin driver ni codigo de conexion Postgres en el repo todavia.
+
+### 17.6 Limites conocidos
+
+Ver "Pendiente conocido: Entrega 5 (Producción)" en [spec/PROJECT-MAP.md](spec/PROJECT-MAP.md): PostgreSQL sin construir (solo documentado), sin integracion con un secret manager externo real, OIDC sin validar contra un IdP real, chaos test acotado a la caida de OpenCTI (no destino/DB), load test simple no una herramienta real tipo k6/locust, archivo historico de IOC y SLO de latencia por destino siguen sin resolver.

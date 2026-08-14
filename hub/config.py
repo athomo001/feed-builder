@@ -1,9 +1,10 @@
-"""Configuracion propia del Hub (spec/02-OPENCTI-COMPATIBILITY.md "Configuracion
-minima de conexion", spec/03-ARCHITECTURE.md "Hub tiene su propio archivo de
-configuracion/secretos, separado del de OpenCTI").
+"""Configuracion propia del Hub, separada del archivo de configuracion/
+secretos de OpenCTI.
 
 Solo lee variables con prefijo propio del Hub; nunca las compartidas del
-.env de OpenCTI (MinIO, RabbitMQ, Neo4j, conectores, etc. - ver spec/02).
+.env de OpenCTI (MinIO, RabbitMQ, Neo4j, conectores, etc.).
+
+Autor: Athan Espinoza
 """
 import os
 from dataclasses import dataclass
@@ -12,6 +13,9 @@ from typing import Optional
 
 @dataclass
 class HubConfig:
+    # Un campo por variable de entorno relevante para el Hub (ver
+    # load_config mas abajo); usar un dataclass en vez de un dict le da
+    # tipado y autocompletado al resto del codigo.
     opencti_url: str
     opencti_token: str
     opencti_stream_id: Optional[str] = None
@@ -35,17 +39,14 @@ class HubConfig:
     source_id: str = "opencti-main"
     state_dir: str = "./state"
 
-    # spec/08-API-SECURITY.md "CORS cerrado a origen de UI": cerrado por
-    # defecto (lista vacia), habilitado explicitamente al origen real de la
-    # UI Angular (ver ui/src/environments y README.md 15) via ADMIN_UI_ORIGINS.
+    # CORS cerrado por defecto (lista vacia); se habilita explicitamente al
+    # origen real de la UI Angular via ADMIN_UI_ORIGINS.
     admin_ui_origins: list = None  # type: ignore[assignment]
 
-    # spec/09-ROADMAP-ACCEPTANCE.md Entrega 4 "Alertas email/webhook";
-    # spec/06-OBSERVABILITY.md seccion 5 "usar cooldown para no inundar al
-    # operador" (sin numero fijado por la spec, se fija aca) y umbrales por
-    # condicion (spec/09 Decision #9 -- SLO por destino -- sigue abierta;
-    # `alert_destination_stale_seconds` es un umbral unico a nivel Hub, no
-    # un SLO por destino).
+    # Cooldown para no inundar al operador con alertas repetidas (el valor
+    # no viene de ninguna configuracion externa, se fija aca) y umbrales
+    # independientes por condicion. `alert_destination_stale_seconds` es un
+    # umbral unico a nivel Hub, no un SLO por destino individual.
     alert_cooldown_seconds: int = 300
     alert_opencti_disconnected_seconds: int = 120
     alert_cursor_stale_seconds: int = 300
@@ -61,11 +62,43 @@ class HubConfig:
     alert_webhook_credential_ref: Optional[str] = None
     alert_webhook_min_severity: str = "info"
 
+    # Cifrado en reposo con clave externa: se eligio este enfoque en vez de
+    # integrar un secret manager externo real porque cumple el mismo
+    # objetivo de seguridad sin depender de infraestructura adicional. La
+    # clave nunca vive en la DB ni en `state_dir`; `secret_encryption_key_file`
+    # es una alternativa a pasarla directo por variable de entorno (por
+    # ejemplo un secret montado como archivo en el orquestador).
+    secret_encryption_key: Optional[str] = None
+    secret_encryption_key_file: Optional[str] = None
+
+    # Los API tokens existentes siguen sin cambios para automatizacion; esto
+    # es un segundo mecanismo pensado para humanos interactivos, no un
+    # reemplazo. Sin IdP real disponible en este entorno para probar contra
+    # el (ver hub/oidc_client.py).
+    oidc_issuer_url: Optional[str] = None
+    oidc_client_id: Optional[str] = None
+    oidc_client_secret_ref: Optional[str] = None
+    oidc_redirect_uri: Optional[str] = None
+    oidc_role_claim: str = "roles"
+    oidc_role_mapping: dict = None  # type: ignore[assignment]  # claim-value -> Role
+    oidc_session_ttl_seconds: int = 28800
+
+    # OpenTelemetry es una salida opcional: sin `otel_exporter_endpoint`
+    # configurado, `hub/tracing.py` no instala nada (el tracer global de
+    # OTel ya es no-op por defecto).
+    otel_exporter_endpoint: Optional[str] = None
+    otel_service_name: str = "opencti-ioc-hub"
+
     def __post_init__(self):
+        # Los defaults mutables (list/dict) no pueden ir directo en la firma
+        # del dataclass porque se compartirian entre instancias; se
+        # inicializan aca cuando llegan en None.
         if self.admin_ui_origins is None:
             self.admin_ui_origins = []
         if self.alert_email_to is None:
             self.alert_email_to = []
+        if self.oidc_role_mapping is None:
+            self.oidc_role_mapping = {}
 
     @property
     def verify(self):
@@ -76,6 +109,9 @@ class HubConfig:
 
 
 def load_config(env: Optional[dict] = None) -> HubConfig:
+    # `env` es inyectable (en vez de leer siempre os.environ) para que los
+    # tests puedan construir un HubConfig sin mutar variables de entorno
+    # reales del proceso.
     e = env if env is not None else os.environ
 
     def get(name, default=None):
@@ -89,16 +125,28 @@ def load_config(env: Optional[dict] = None) -> HubConfig:
         raise RuntimeError("OPENCTI_SERVICE_ACCOUNT_TOKEN is not set")
 
     def env_bool(name, default):
+        # Acepta las representaciones textuales mas comunes de "true" que
+        # vienen de un .env o de variables de entorno del orquestador.
         value = get(name)
         if value is None:
             return default
         return str(value).strip().lower() in ("1", "true", "yes", "on")
 
     def env_int(name, default):
+        # Trata "" igual que ausente: una variable seteada pero vacia en el
+        # .env no debe romper el parseo a int.
         value = get(name)
         if value is None or str(value).strip() == "":
             return default
         return int(value)
+
+    def _json_dict(value):
+        if not value:
+            return {}
+        # Import local: json solo hace falta si OIDC_ROLE_MAPPING viene seteado.
+        import json
+
+        return json.loads(value)
 
     return HubConfig(
         opencti_url=url.rstrip("/"),
@@ -132,4 +180,15 @@ def load_config(env: Optional[dict] = None) -> HubConfig:
         alert_webhook_url=get("ALERT_WEBHOOK_URL") or None,
         alert_webhook_credential_ref=get("ALERT_WEBHOOK_CREDENTIAL_REF") or None,
         alert_webhook_min_severity=get("ALERT_WEBHOOK_MIN_SEVERITY", "info"),
+        secret_encryption_key=get("SECRET_ENCRYPTION_KEY") or None,
+        secret_encryption_key_file=get("SECRET_ENCRYPTION_KEY_FILE") or None,
+        oidc_issuer_url=get("OIDC_ISSUER_URL") or None,
+        oidc_client_id=get("OIDC_CLIENT_ID") or None,
+        oidc_client_secret_ref=get("OIDC_CLIENT_SECRET_REF") or None,
+        oidc_redirect_uri=get("OIDC_REDIRECT_URI") or None,
+        oidc_role_claim=get("OIDC_ROLE_CLAIM", "roles"),
+        oidc_role_mapping=_json_dict(get("OIDC_ROLE_MAPPING")),
+        oidc_session_ttl_seconds=env_int("OIDC_SESSION_TTL_SECONDS", 28800),
+        otel_exporter_endpoint=get("OTEL_EXPORTER_OTLP_ENDPOINT") or None,
+        otel_service_name=get("OTEL_SERVICE_NAME", "opencti-ioc-hub"),
     )

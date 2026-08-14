@@ -1,19 +1,18 @@
-"""Orquestacion de un evento contra TODOS los destinos configurados
-(spec/09-ROADMAP-ACCEPTANCE.md Entrega 1 "separar ingestion, politicas,
-persistencia y escritura TXT"; Entrega 2 "CRUD de destinos y politicas").
+"""Orquestacion de un evento contra TODOS los destinos configurados.
 
-Entrega 1 usaba un unico destino fijo (`txt-feed-default`) porque todavia
-no existia CRUD de destinos ni politicas configurables -- quedo documentado
-como solucion temporal en spec/PROJECT-MAP.md. Entrega 2 lo reemplaza: cada
-evento se evalua contra la politica ACTIVA publicada de cada destino
+Cada evento se evalua contra la politica ACTIVA publicada de cada destino
 habilitado (`hub.policy_engine.evaluate`), y cada combinacion evento x
-destino sigue produciendo su propia fila de ledger
-(`event_id + destination_id + policy_version`, el diseno original de
-`hub/ledger.py` desde Entrega 0).
+destino produce su propia fila de ledger
+(`event_id + destination_id + policy_version`, el diseno de
+`hub/ledger.py`), de forma que un mismo evento puede aceptarse en un
+destino y rechazarse o expirar en otro sin que un resultado interfiera con
+el otro.
 
 Dedup (`event_id`/`content_version`/`same_value`) sigue siendo a nivel de
-evento, no por destino (spec/04 "Duplicacion" capas 1-2 son sobre el objeto
-OpenCTI, no sobre el destino).
+evento, no por destino: esas capas de duplicacion operan sobre el objeto
+OpenCTI en si, no sobre a que destino se vaya a entregar.
+
+Autor: Athan Espinoza
 """
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -29,16 +28,22 @@ from hub.normalize import normalize_stix_indicator
 from hub.policy import PolicyOutcome, ReasonCode
 from hub.policy_engine import evaluate as evaluate_policy
 from hub.policy_store import get_active_version_for_destination
+from hub.tracing import span
 
-# spec/04 "Politica de duplicados": DUPLICATE_EVENT/DUPLICATE_CONTENT son
-# reintentos reales y se descartan. SAME_VALUE_NEW_VERSION es una
-# actualizacion legitima con el mismo valor textual -- "nunca se debe
-# ocultar" -- asi que NO esta en este set: se anota pero sigue el flujo.
+# DUPLICATE_EVENT/DUPLICATE_CONTENT son reintentos reales del mismo dato y
+# se descartan sin llegar a evaluar politica. SAME_VALUE_NEW_VERSION es una
+# actualizacion legitima con el mismo valor textual -- nunca se debe
+# ocultar -- asi que NO esta en este set: se anota como razon pero el
+# evento sigue el flujo normal de evaluacion por destino.
 _BLOCKING_DUPLICATE_REASONS = {ReasonCode.DUPLICATE_EVENT, ReasonCode.DUPLICATE_CONTENT}
 
 
 @dataclass
 class DedupState:
+    # Tres colecciones separadas porque hay tres capas de deduplicacion
+    # distintas (evento exacto ya visto, nueva version de un stix_id ya
+    # visto, mismo valor normalizado visto antes con otra version); mezclar
+    # cualquiera de ellas rompe la clasificacion en `classify_duplicate`.
     seen_event_ids: set = field(default_factory=set)
     seen_content_versions: set = field(default_factory=set)
     seen_content_values: dict = field(default_factory=dict)
@@ -51,6 +56,9 @@ class PipelineResult:
 
 
 def _record(ledger_conn, event: CanonicalIOCEvent, destination_id: str, *, state, reason, now) -> LedgerEntry:
+    # Construccion compartida de LedgerEntry para los caminos que nunca
+    # llegan a intentar una entrega real (duplicado bloqueante, sin politica
+    # activa, revocado o expirado) y por eso no pasan por `deliver()`.
     entry = LedgerEntry(
         event_id=event.event_id,
         stix_id=event.stix_id,
@@ -81,7 +89,11 @@ def process_envelope(
 ) -> PipelineResult:
     now = now or datetime.now(timezone.utc)
     circuit_breakers = circuit_breakers if circuit_breakers is not None else {}
-    event = normalize_stix_indicator(envelope, event_id=event_id, source_id=source_id)
+    # Normalizar primero: la clasificacion de duplicados y el resto del
+    # flujo necesitan los campos canonicos (stix_id, modified_at, valor
+    # normalizado), no el envelope crudo de OpenCTI.
+    with span("opencti.event.normalize", event_id=event_id):
+        event = normalize_stix_indicator(envelope, event_id=event_id, source_id=source_id)
 
     dup_reason = classify_duplicate(
         event,
@@ -109,13 +121,18 @@ def process_envelope(
     entries: list[LedgerEntry] = []
 
     for destination in destinations:
+        # Se resuelve la version activa por destino en cada evento (no se
+        # cachea) porque un operador puede publicar una nueva politica en
+        # cualquier momento y el proximo evento debe evaluarse contra ella.
         policy = get_active_version_for_destination(policies_conn, destination.destination_id)
         if policy is None:
-            # spec/08 "politica obligatoria antes de activar destino": sin
-            # politica publicada, el destino simplemente no participa.
+            # Sin politica publicada y activa, el destino simplemente no
+            # participa: una politica es obligatoria antes de poder activar
+            # un destino, para evitar entregas sin reglas definidas.
             continue
 
-        decision = evaluate_policy(event, policy, default_ttl_days=default_ttl_days, now=now)
+        with span("policy.evaluate", event_id=event.event_id, stix_id=event.stix_id):
+            decision = evaluate_policy(event, policy, default_ttl_days=default_ttl_days, now=now)
         adapter = adapters.get(destination.destination_id)
 
         if decision.outcome is PolicyOutcome.ACCEPTED:

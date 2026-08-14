@@ -12,6 +12,10 @@ from hub.graphql_client import GraphQLClient, extract_nodes
 from hub.graphql_indicator import BACKFILL_INDICATORS_QUERY, indicator_node_to_envelope
 
 
+def _log(msg: str) -> None:
+    print(f"[hub] {msg}", flush=True)
+
+
 def _parse_dt(value) -> Optional[datetime]:
     if not value:
         return None
@@ -23,6 +27,7 @@ class BackfillResult:
     pages: int = 0
     indicators_seen: int = 0
     envelopes_emitted: int = 0
+    skipped_errors: int = 0
     last_cursor: Optional[str] = None
     stopped_reason: str = "exhausted"  # exhausted | max_pages | should_stop | window
 
@@ -68,8 +73,16 @@ def run_backfill(
             if modified is not None and modified < since:
                 window_reached = True
                 continue
-            on_envelope(indicator_node_to_envelope(node, action="create"))
-            result.envelopes_emitted += 1
+            try:
+                # Un indicador individual no clasificable o malformado (ej.
+                # main_observable_type sin adaptador, como "Artifact") no debe
+                # tumbar todo el backfill -- mismo criterio que ya aplica el
+                # Live Stream en hub/service.py alrededor de runtime.process.
+                on_envelope(indicator_node_to_envelope(node, action="create"))
+                result.envelopes_emitted += 1
+            except Exception as e:
+                result.skipped_errors += 1
+                _log(f"BACKFILL_NODE_ERROR: id={node.get('id')!r}: {e}")
 
         if window_reached:
             result.stopped_reason = "window"

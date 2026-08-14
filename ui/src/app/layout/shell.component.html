@@ -1,0 +1,24 @@
+<mat-sidenav-container class="shell">
+  <mat-sidenav mode="side" opened class="shell__nav" [attr.aria-label]="'Navegacion principal'">
+    <div class="shell__brand">OpenCTI IOC Hub</div>
+    <mat-nav-list>
+      @for (item of navItems(); track item.path) {
+        <a mat-list-item [routerLink]="item.path" routerLinkActive="shell__nav-item--active">
+          <mat-icon matListItemIcon>{{ item.icon }}</mat-icon>
+          <span matListItemTitle>{{ item.label }}</span>
+        </a>
+      }
+    </mat-nav-list>
+  </mat-sidenav>
+
+  <mat-sidenav-content>
+    <mat-toolbar class="shell__toolbar">
+      <span class="shell__spacer"></span>
+      <span class="shell__role">Rol: {{ role() }}</span>
+      <button mat-button (click)="logout()">Cerrar sesion</button>
+    </mat-toolbar>
+    <main class="shell__content">
+      <router-outlet />
+    </main>
+  </mat-sidenav-content>
+</mat-sidenav-container>

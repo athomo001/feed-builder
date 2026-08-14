@@ -1,0 +1,70 @@
+<h2 mat-dialog-title>{{ isEdit ? 'Editar destino' : 'Nuevo destino' }}</h2>
+<mat-dialog-content class="form-grid">
+  <mat-form-field appearance="outline">
+    <mat-label>ID del destino</mat-label>
+    <input matInput [ngModel]="destinationId()" (ngModelChange)="destinationId.set($event)" [disabled]="isEdit" />
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Nombre</mat-label>
+    <input matInput [ngModel]="name()" (ngModelChange)="name.set($event)" />
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Adapter</mat-label>
+    <mat-select [ngModel]="adapter()" (ngModelChange)="adapter.set($event)" [disabled]="isEdit">
+      <mat-option value="txt_feed">txt_feed (Fortinet / Palo Alto EDL / pfSense / Cisco SI)</mat-option>
+      <mat-option value="http_push">http_push</mat-option>
+      <mat-option value="csv_feed">csv_feed (Check Point)</mat-option>
+      <mat-option value="mikrotik_rsc">mikrotik_rsc (MikroTik RouterOS)</mat-option>
+      <mat-option value="wazuh_cdb">wazuh_cdb (Wazuh)</mat-option>
+      <mat-option value="qradar_reference_set">qradar_reference_set (QRadar)</mat-option>
+      <mat-option value="stix_bundle_feed">stix_bundle_feed (STIX 2.1)</mat-option>
+      <mat-option value="taxii2">taxii2 (servidor TAXII 2.1)</mat-option>
+    </mat-select>
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Formato</mat-label>
+    <input matInput [ngModel]="format()" (ngModelChange)="format.set($event)" />
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Endpoint (http_push)</mat-label>
+    <input matInput [ngModel]="endpoint()" (ngModelChange)="endpoint.set($event)" />
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>credential_ref (ej. env://QRADAR_TOKEN)</mat-label>
+    <input matInput [ngModel]="credentialRef()" (ngModelChange)="credentialRef.set($event)" />
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Tipos de IOC permitidos (family/subtype, separados por coma)</mat-label>
+    <input matInput [ngModel]="allowedIocTypes()" (ngModelChange)="allowedIocTypes.set($event)" placeholder="hash/sha256, red/ipv4" />
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Timeout (segundos)</mat-label>
+    <input matInput type="number" [ngModel]="timeoutSeconds()" (ngModelChange)="timeoutSeconds.set($event)" />
+  </mat-form-field>
+
+  <mat-checkbox [ngModel]="supportsDelete()" (ngModelChange)="supportsDelete.set($event)">Soporta delete</mat-checkbox>
+
+  <mat-form-field appearance="outline">
+    <mat-label>capacity (JSON)</mat-label>
+    <textarea matInput rows="4" [ngModel]="capacityJson()" (ngModelChange)="capacityJson.set($event)"></textarea>
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>format_options (JSON) -- ej. columns/list_name/reference_set_name segun el adapter</mat-label>
+    <textarea matInput rows="4" [ngModel]="formatOptionsJson()" (ngModelChange)="formatOptionsJson.set($event)"></textarea>
+  </mat-form-field>
+  @if (jsonError()) {
+    <p class="form-error" role="alert">{{ jsonError() }}</p>
+  }
+</mat-dialog-content>
+<mat-dialog-actions align="end">
+  <button mat-button (click)="cancel()">Cancelar</button>
+  <button mat-flat-button color="primary" (click)="save()">Guardar</button>
+</mat-dialog-actions>

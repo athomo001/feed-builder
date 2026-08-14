@@ -1,0 +1,67 @@
+<h2 mat-dialog-title>Simular "{{ data.policyId }}"</h2>
+<mat-dialog-content>
+  <p>Simula la ultima version contra una muestra reciente de OpenCTI. No afecta produccion.</p>
+  <mat-form-field appearance="outline">
+    <mat-label>Tamano de muestra</mat-label>
+    <input matInput type="number" [ngModel]="sampleSize()" (ngModelChange)="sampleSize.set($event)" />
+  </mat-form-field>
+  <button mat-flat-button color="primary" [disabled]="running()" (click)="run()">
+    {{ running() ? 'Simulando...' : 'Simular' }}
+  </button>
+
+  @if (running()) {
+    <mat-spinner diameter="32" style="margin-top: 1rem" />
+  }
+
+  @if (error()) {
+    <p class="form-error" role="alert">{{ error() }}</p>
+  }
+
+  @if (report(); as r) {
+    <div class="diff">
+      <div>
+        <h3>Antes (version activa)</h3>
+        <p>Aceptados: {{ r.before.accepted }} &middot; Rechazados: {{ r.before.rejected }} &middot; Revocados: {{ r.before.revoked }}</p>
+      </div>
+      <div>
+        <h3>Despues (candidata v{{ r.candidate_version }})</h3>
+        <p>Aceptados: {{ r.after.accepted }} &middot; Rechazados: {{ r.after.rejected }} &middot; Revocados: {{ r.after.revoked }}</p>
+      </div>
+    </div>
+
+    @if (r.threshold_alert) {
+      <p class="form-error" role="alert">
+        Cambio de volumen significativo ({{ r.delta_pct }}%). Revisa los ejemplos antes de publicar.
+      </p>
+    }
+
+    <h3>Ejemplos (candidata)</h3>
+    <table mat-table [dataSource]="r.after.examples" class="mat-elevation-z1 full-width">
+      <ng-container matColumnDef="stix_id">
+        <th mat-header-cell *matHeaderCellDef>STIX ID</th>
+        <td mat-cell *matCellDef="let e">{{ e.stix_id }}</td>
+      </ng-container>
+      <ng-container matColumnDef="family">
+        <th mat-header-cell *matHeaderCellDef>Familia</th>
+        <td mat-cell *matCellDef="let e">{{ e.family }}</td>
+      </ng-container>
+      <ng-container matColumnDef="subtype">
+        <th mat-header-cell *matHeaderCellDef>Subtipo</th>
+        <td mat-cell *matCellDef="let e">{{ e.subtype }}</td>
+      </ng-container>
+      <ng-container matColumnDef="outcome">
+        <th mat-header-cell *matHeaderCellDef>Resultado</th>
+        <td mat-cell *matCellDef="let e">{{ e.outcome }}</td>
+      </ng-container>
+      <ng-container matColumnDef="reason">
+        <th mat-header-cell *matHeaderCellDef>Motivo</th>
+        <td mat-cell *matCellDef="let e">{{ e.reason }}</td>
+      </ng-container>
+      <tr mat-header-row *matHeaderRowDef="exampleColumns"></tr>
+      <tr mat-row *matRowDef="let row; columns: exampleColumns"></tr>
+    </table>
+  }
+</mat-dialog-content>
+<mat-dialog-actions align="end">
+  <button mat-button mat-dialog-close>Cerrar</button>
+</mat-dialog-actions>

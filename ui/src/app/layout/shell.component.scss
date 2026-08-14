@@ -1,0 +1,41 @@
+.shell {
+  height: 100vh;
+}
+
+.shell__nav {
+  width: 260px;
+  padding: 0.5rem 0;
+}
+
+.shell__brand {
+  padding: 1rem;
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.shell__nav-item--active {
+  background: var(--mat-sys-secondary-container);
+}
+
+.shell__toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.shell__spacer {
+  flex: 1 1 auto;
+}
+
+.shell__role {
+  margin-right: 1rem;
+  text-transform: capitalize;
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+.shell__content {
+  padding: 1.5rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}

@@ -355,7 +355,7 @@ La suite de `tests/hub/` cubre los contratos de Entrega 0, el nucleo de Entrega 
 
 ### 13.5 Backup y restore
 
-El estado durable vive en `HUB_STATE_DIR` (`cursor.sqlite3`, `ledger.sqlite3`, `destinations.sqlite3`, `policies.sqlite3`, `tokens.sqlite3`, `idempotency.sqlite3`, `.heartbeat`) y los feeds materializados en `TXT_FEED_DIR`. Para respaldar, copiar ambos directorios con el proceso detenido o usando `sqlite3 .backup` sobre los `.sqlite3`; para restaurar, reponer los archivos antes de arrancar `hub.service`/`hub.api` (el estado se recarga solo al iniciar).
+El estado durable vive en `HUB_STATE_DIR` (`cursor.sqlite3`, `ledger.sqlite3`, `destinations.sqlite3`, `policies.sqlite3`, `tokens.sqlite3`, `idempotency.sqlite3`, `audit.sqlite3`, `ingestion_control.sqlite3`, `.heartbeat`) y los feeds materializados en `TXT_FEED_DIR`. Para respaldar, copiar ambos directorios con el proceso detenido o usando `sqlite3 .backup` sobre los `.sqlite3`; para restaurar, reponer los archivos antes de arrancar `hub.service`/`hub.api` (el estado se recarga solo al iniciar).
 
 ## 14) Admin API - rediseno (Entrega 2)
 
@@ -406,6 +406,169 @@ curl -s -X POST http://localhost:8000/admin/api/v1/policies/fortigate-policy/pub
 
 Un destino sin politica publicada no recibe entregas (spec/08 "politica obligatoria antes de activar destino").
 
-### 14.4 Limites conocidos
+### 14.4 Auditoria, busqueda de eventos y control de ingestion
 
-Ver "Pendiente conocido: Entrega 2" en [spec/PROJECT-MAP.md](spec/PROJECT-MAP.md): sin cola/workers real (reintentos son manuales via `POST /deliveries/{id}/retry` o automatizacion externa), adapter HTTP push sin validar contra un destino real, `credential_ref` solo resuelve `env://` (sin secret manager todavia), rate limit en memoria del proceso.
+Preparacion de backend para Entrega 3 (spec/07-ADMIN-UI-ANGULAR.md), antes de tocar Angular:
+
+```bash
+# Auditoria (rol viewer), filtrable por actor/accion/recurso/fecha
+curl -s "http://localhost:8000/admin/api/v1/audit?resource_type=destination" -H "Authorization: Bearer $TOKEN"
+
+# Buscar entregas en el ledger (rol viewer)
+curl -s "http://localhost:8000/admin/api/v1/events?stix_id=indicator--..." -H "Authorization: Bearer $TOKEN"
+curl -s "http://localhost:8000/admin/api/v1/events/{event_id}" -H "Authorization: Bearer $TOKEN"  # linea de tiempo
+
+# Control de ingestion: pausar/reanudar y reconciliar (rol operator)
+curl -s -X POST http://localhost:8000/admin/api/v1/ingestion/pause -H "Authorization: Bearer $TOKEN"
+curl -s -X POST http://localhost:8000/admin/api/v1/ingestion/reconcile -H "Authorization: Bearer $TOKEN"
+
+# Rebobinar cursor (rol security-admin, motivo obligatorio)
+curl -s -X POST http://localhost:8000/admin/api/v1/ingestion/rewind \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"cursor_value": "<id-de-evento-sse-anterior>", "reason": "brecha detectada en reconciliacion"}'
+```
+
+`hub.service` (ingestion) y `hub.api` (Admin API) son procesos separados: los pedidos de pausar/reconciliar/rebobinar se escriben en `ingestion_control.sqlite3` (`hub/ingestion_control.py`) y el loop de `hub.service` los aplica sondeando esa tabla, no hay llamada directa entre procesos.
+
+### 14.5 Limites conocidos
+
+Ver "Pendiente conocido: Entrega 2" y "Pendiente conocido: Entrega 3 (UI Angular)" en [spec/PROJECT-MAP.md](spec/PROJECT-MAP.md): sin cola/workers real (reintentos son manuales via `POST /deliveries/{id}/retry` o automatizacion externa), adapter HTTP push sin validar contra un destino real, `credential_ref` solo resuelve `env://` (sin secret manager todavia), rate limit en memoria del proceso, sin Canonical Event Store (el Inspector del Event Ledger queda acotado a lo que el ledger ya guarda), sin log store/SSE real (la UI usa polling corto).
+
+## 15) UI Angular - Admin Dashboard (Entrega 3)
+
+Consola operativa en `ui/` (spec/07-ADMIN-UI-ANGULAR.md), consume el Admin API de la seccion 14. Angular **21.x** (no 22.x: Angular CLI 22.x exige Node >=24.15.0/22.22.3/26 y el entorno de build tenia Node 24.13.0 sin gestor de version disponible para subir; sustitucion documentada, ver [CHANGELOG.md](CHANGELOG.md) `[0.1.5]`).
+
+### 15.1 Instalar y correr en desarrollo
+
+```bash
+cd ui
+npm install
+npx ng serve   # http://localhost:4200, apunta a http://localhost:8000 (ver src/environments/environment.development.ts)
+```
+
+El Admin API debe correr por separado (seccion 14.1) **con** `ADMIN_UI_ORIGINS=http://localhost:4200` seteado (spec/08 "CORS cerrado a origen de UI": cerrado por defecto, se habilita explicitamente al origen real de la UI):
+
+```bash
+ADMIN_UI_ORIGINS=http://localhost:4200 python -m hub.api
+```
+
+Login: pegar un API token ya generado (seccion 14.2) y elegir el rol con el que se creo. El token vive solo en memoria de la pestana (sin `localStorage`/`sessionStorage`, spec/07 "Seguridad frontend"): se pierde al refrescar la pagina, por diseno.
+
+### 15.2 Build de produccion
+
+```bash
+cd ui
+npx ng build
+```
+
+Genera `ui/dist/ui/`, para servir detras del mismo Nginx/dominio que expone el Admin API (mismo origen evita configurar `ADMIN_UI_ORIGINS`; `src/environments/environment.ts` asume `apiBaseUrl: '/admin/api/v1'` relativo).
+
+### 15.3 Tests unitarios y E2E
+
+```bash
+cd ui
+npx ng test --watch=false       # Vitest, unitarios
+
+npx playwright install chromium # una sola vez
+npx playwright test             # E2E: levanta backend Python + ng serve automaticamente
+```
+
+El E2E (`ui/e2e/`) siembra un token `security-admin` y una entrega en dead-letter en un `state_dir` temporal que se limpia al inicio de cada corrida (para que sea reproducible), y no depende de una instancia OpenCTI real (`OPENCTI_URL`/`OPENCTI_SERVICE_ACCOUNT_TOKEN` ficticios, suficientes para levantar el proceso). Cubre: login (redirect sin sesion, token valido, token invalido), descartar una entrega de DLQ con motivo obligatorio, y el flujo completo de politicas (crear borrador -> simular con el error esperado sin OpenCTI real -> publicar con motivo).
+
+### 15.4 Secciones de navegacion
+
+Las 7 de spec/07: Overview, Observabilidad & Logs, Operaciones & DLQ, Politicas, Destinos, OpenCTI/Ingesta, Auditoria & Configuracion. RBAC client-side (misma jerarquia que la seccion 14.2) oculta botones de acciones que igual fallarian con 403 en el servidor -- la autorizacion real siempre la aplica el Admin API.
+
+### 15.5 Limites conocidos
+
+Ver "Pendiente conocido: Entrega 3 (UI Angular)" en [spec/PROJECT-MAP.md](spec/PROJECT-MAP.md): sin visor de logs en vivo (no hay log store), sin configuracion operativa editable (no hay endpoints), sin preview de volumen al rebobinar el cursor -- ambos gaps se muestran explicitamente como "no disponible" en la propia UI en vez de simularse.
+
+## 16) Integraciones - Entrega 4
+
+spec/09-ROADMAP-ACCEPTANCE.md "Entrega 4": adapters de destino nuevos priorizados por esfuerzo real (spec/05 "Modos de entrega y esfuerzo relativo"), servidor TAXII 2.1 propio y alertas email/webhook.
+
+### 16.1 Bajo esfuerzo (reusan el adapter `txt_feed` existente, sin codigo nuevo)
+
+Fortinet/FortiGate (External Connector), Palo Alto PAN-OS (External Dynamic List), pfSense/pfBlockerNG, Cisco Security Intelligence: los cuatro consumen un feed TXT plano (un IOC por linea, feeds separados por subtipo) -- exactamente lo que `adapter: "txt_feed"` ya escribe desde la Entrega 2. Alta vía `POST /admin/api/v1/destinations` con `"adapter": "txt_feed"`, sin campos adicionales.
+
+Recorda la escalera de autenticacion cuando el fabricante hace *poll* sobre la URL del Hub (spec/05, nunca publicar sin al menos un control de acceso): Basic Auth cuando el fabricante lo soporta (Fortinet, Palo Alto), token no adivinable en la URL cuando no (Cisco Security Intelligence, pfBlockerNG), o mTLS si ya se gestiona PKI interna (Palo Alto).
+
+### 16.2 Esfuerzo medio (adapters nuevos, formato propio o API dedicada)
+
+```bash
+TOKEN=... # rol security-admin
+
+# Check Point (CSV multi-columna, columnas configurables)
+curl -s -X POST http://localhost:8000/admin/api/v1/destinations \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"destination_id": "checkpoint-prod", "name": "Check Point", "adapter": "csv_feed", "format": "csv",
+       "format_options": {"columns": ["family", "subtype", "value", "score", "confidence", "marking", "created_at", "valid_until"]}}'
+
+# MikroTik RouterOS (.rsc, solo IP/CIDR -- address-list no acepta dominios ni hashes)
+curl -s -X POST http://localhost:8000/admin/api/v1/destinations \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"destination_id": "mikrotik-prod", "name": "MikroTik", "adapter": "mikrotik_rsc", "format": "rsc",
+       "allowed_ioc_types": ["network/ipv4", "network/cidr"], "format_options": {"list_name": "hub-blocklist"}}'
+
+# Wazuh (CDB list -- el Hub solo materializa el archivo; sincronizarlo al manager y recargar es responsabilidad externa)
+curl -s -X POST http://localhost:8000/admin/api/v1/destinations \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"destination_id": "wazuh-prod", "name": "Wazuh", "adapter": "wazuh_cdb", "format": "cdb"}'
+
+# QRadar (Reference Set API, bulk_load)
+curl -s -X POST http://localhost:8000/admin/api/v1/destinations \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"destination_id": "qradar-refset", "name": "QRadar", "adapter": "qradar_reference_set", "format": "json",
+       "endpoint": "https://qradar.example", "credential_ref": "env://QRADAR_SEC_TOKEN",
+       "format_options": {"reference_set_name": "hub-malicious-ips"}}'
+```
+
+MikroTik: el Hub solo genera el bloque `add address=... list=... timeout=...`; envolverlo en el propio Scheduler/`/tool fetch` del router queda del lado del operador (spec/05 no documenta una plantilla `.rsc` completa). Wazuh: el archivo CDB generado en `TXT_FEED_DIR/<destino>/<subtipo>.cdb` debe sincronizarse al filesystem del manager y disparar el reload por fuera del Hub (Decision #11 de spec/09, resuelta asi para no construir un agente/sync-companion con su propia superficie de credenciales SSH).
+
+### 16.3 Alto esfuerzo: STIX 2.1 y servidor TAXII 2.1
+
+`stix_bundle_feed` materializa un `bundle.json` por destino (Bundle STIX 2.1 con todos los indicators vigentes). `taxii2` expone esos mismos indicators via un servidor TAXII 2.1 minimo y de solo lectura que corre el propio Hub (Decision #4 de spec/09: el Hub filtra por politica antes de exponer el IOC, por eso no alcanza con el TAXII nativo de OpenCTI para este caso):
+
+```bash
+curl -s -X POST http://localhost:8000/admin/api/v1/destinations \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"destination_id": "cisco-tid", "name": "Cisco TID", "adapter": "taxii2", "format": "stix2.1",
+       "credential_ref": "env://TAXII_CISCO_BASIC_AUTH"}'
+```
+
+`env://TAXII_CISCO_BASIC_AUTH` debe contener `usuario:password` (mismo secreto resuelto por `hub/credentials.py`, formato Basic Auth). Consumo (Cisco TID u otro cliente TAXII 2.1):
+
+```bash
+curl -s http://localhost:8000/taxii2/                                          # discovery, publico
+curl -s http://localhost:8000/taxii2/hub/collections/                          # lista, publico (solo metadata)
+curl -s -u cisco:s3cret http://localhost:8000/taxii2/hub/collections/cisco-tid/objects/
+```
+
+El Hub es productor: `POST` a `.../objects/` devuelve 405. Una coleccion TAXII es append/update-only -- descartar/revocar un IOC republica el mismo objeto con `revoked: true`, nunca lo borra (a diferencia de `stix_bundle_feed`, que si remueve el objeto del bundle porque es una foto del estado actual, no un log).
+
+### 16.4 Alertas email/webhook
+
+```bash
+# Variables de entorno relevantes (todas opcionales; sin ninguna, no se notifica por ningun canal)
+ALERT_COOLDOWN_SECONDS=300                  # minimo entre notificaciones repetidas de la misma alerta
+ALERT_SMTP_HOST=smtp.example.internal
+ALERT_SMTP_PORT=587
+ALERT_EMAIL_FROM=hub@example.internal
+ALERT_EMAIL_TO=soc@example.internal,ops@example.internal
+ALERT_EMAIL_CREDENTIAL_REF=env://ALERT_SMTP_CREDENTIALS   # "usuario:password"
+ALERT_EMAIL_MIN_SEVERITY=warning            # info | warning | critical
+ALERT_WEBHOOK_URL=https://ops.example/hooks/hub-alerts
+ALERT_WEBHOOK_CREDENTIAL_REF=env://ALERT_WEBHOOK_SECRET   # secreto HMAC-SHA256
+ALERT_WEBHOOK_MIN_SEVERITY=info
+
+# Disparar evaluacion manualmente (o via cron externo -- sin scheduler real, spec/03 "Queue y workers")
+curl -s -X POST http://localhost:8000/admin/api/v1/alerts/evaluate -H "Authorization: Bearer $TOKEN"
+curl -s http://localhost:8000/admin/api/v1/alerts -H "Authorization: Bearer $TOKEN"
+curl -s -X POST http://localhost:8000/admin/api/v1/alerts/{alert_id}/acknowledge -H "Authorization: Bearer $TOKEN"
+```
+
+`hub.service` (el proceso de ingestion) ademas evalua automaticamente, una vez por minuto en su propio loop, las 2 condiciones que dependen de su estado in-process (OpenCTI desconectado, cursor sin avanzar); el resto (dead-letter, destino sin entrega, feed sin rebuild) se evaluan desde el Admin API porque es ese proceso el que tiene ledger/destinos/feeds a mano.
+
+### 16.5 Limites conocidos
+
+Ver "Pendiente conocido: Entrega 4 (Integraciones)" en [spec/PROJECT-MAP.md](spec/PROJECT-MAP.md): sin archivo historico de IOC (fuera de alcance de esta entrega), sin cola/workers real, SLO de latencia por destino sigue como umbral unico a nivel Hub (no por destino), 6 de las 11 condiciones de alerta de spec/06 sin señal disponible (espacio en disco, TLS invalido, caida de volumen historico, entre otras), QRadar y TAXII sin validar contra una instancia/consumidor real, y Check Point/MikroTik/Wazuh sin confirmar el esquema exacto que espera el parser real de cada fabricante (spec/05 lo deja como decision de implementacion).

@@ -1,0 +1,19 @@
+:host {
+  display: block;
+  min-width: 480px;
+}
+
+.diff {
+  display: flex;
+  gap: 2rem;
+  margin: 1rem 0;
+}
+
+.form-error {
+  color: #c62828;
+  font-size: 0.85rem;
+}
+
+.full-width {
+  width: 100%;
+}

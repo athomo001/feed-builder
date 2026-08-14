@@ -1,0 +1,112 @@
+<h1>Observabilidad & Logs</h1>
+
+<h2>Inspector del Event Ledger</h2>
+<p>
+  Buscador acotado a lo que el ledger ya guarda (event_id, stix_id, destino, estado, fecha) -- sin family/subtype/valor
+  por evento todavia (sin Canonical Event Store, ver spec/PROJECT-MAP.md).
+</p>
+
+<div class="filters">
+  <mat-form-field appearance="outline">
+    <mat-label>event_id</mat-label>
+    <input matInput [ngModel]="eventIdFilter()" (ngModelChange)="eventIdFilter.set($event)" />
+  </mat-form-field>
+  <mat-form-field appearance="outline">
+    <mat-label>stix_id</mat-label>
+    <input matInput [ngModel]="stixIdFilter()" (ngModelChange)="stixIdFilter.set($event)" />
+  </mat-form-field>
+  <mat-form-field appearance="outline">
+    <mat-label>destino</mat-label>
+    <input matInput [ngModel]="destinationIdFilter()" (ngModelChange)="destinationIdFilter.set($event)" />
+  </mat-form-field>
+  <mat-form-field appearance="outline">
+    <mat-label>estado</mat-label>
+    <mat-select [ngModel]="stateFilter()" (ngModelChange)="stateFilter.set($event)">
+      <mat-option value="">(cualquiera)</mat-option>
+      <mat-option value="delivered">delivered</mat-option>
+      <mat-option value="retrying">retrying</mat-option>
+      <mat-option value="dead_letter">dead_letter</mat-option>
+      <mat-option value="skipped">skipped</mat-option>
+      <mat-option value="revoked">revoked</mat-option>
+      <mat-option value="expired">expired</mat-option>
+    </mat-select>
+  </mat-form-field>
+  <button mat-flat-button color="primary" (click)="search()">Buscar</button>
+</div>
+
+<table mat-table [dataSource]="results()" class="mat-elevation-z1 full-width">
+  <ng-container matColumnDef="event_id">
+    <th mat-header-cell *matHeaderCellDef>Event ID</th>
+    <td mat-cell *matCellDef="let e">{{ e.event_id }}</td>
+  </ng-container>
+  <ng-container matColumnDef="stix_id">
+    <th mat-header-cell *matHeaderCellDef>STIX ID</th>
+    <td mat-cell *matCellDef="let e">{{ e.stix_id }}</td>
+  </ng-container>
+  <ng-container matColumnDef="destination_id">
+    <th mat-header-cell *matHeaderCellDef>Destino</th>
+    <td mat-cell *matCellDef="let e">{{ e.destination_id }}</td>
+  </ng-container>
+  <ng-container matColumnDef="state">
+    <th mat-header-cell *matHeaderCellDef>Estado</th>
+    <td mat-cell *matCellDef="let e"><app-status-badge [state]="e.state" /></td>
+  </ng-container>
+  <ng-container matColumnDef="reason">
+    <th mat-header-cell *matHeaderCellDef>Motivo</th>
+    <td mat-cell *matCellDef="let e">{{ e.reason }}</td>
+  </ng-container>
+  <ng-container matColumnDef="updated_at">
+    <th mat-header-cell *matHeaderCellDef>Actualizado</th>
+    <td mat-cell *matCellDef="let e">{{ e.updated_at | date: 'short' }}</td>
+  </ng-container>
+  <ng-container matColumnDef="actions">
+    <th mat-header-cell *matHeaderCellDef></th>
+    <td mat-cell *matCellDef="let e">
+      <button mat-button (click)="viewTimeline(e.event_id)">Linea de tiempo</button>
+    </td>
+  </ng-container>
+
+  <tr mat-header-row *matHeaderRowDef="columns"></tr>
+  <tr mat-row *matRowDef="let row; columns: columns"></tr>
+</table>
+@if (searched() && results().length === 0) {
+  <p>Sin resultados para esos filtros.</p>
+}
+
+@if (selectedEventId(); as eventId) {
+  <h3>Linea de tiempo de "{{ eventId }}"</h3>
+  <table mat-table [dataSource]="timeline()" class="mat-elevation-z1 full-width">
+    <ng-container matColumnDef="destination_id">
+      <th mat-header-cell *matHeaderCellDef>Destino</th>
+      <td mat-cell *matCellDef="let e">{{ e.destination_id }}</td>
+    </ng-container>
+    <ng-container matColumnDef="policy_version">
+      <th mat-header-cell *matHeaderCellDef>Version politica</th>
+      <td mat-cell *matCellDef="let e">{{ e.policy_version }}</td>
+    </ng-container>
+    <ng-container matColumnDef="state">
+      <th mat-header-cell *matHeaderCellDef>Estado</th>
+      <td mat-cell *matCellDef="let e"><app-status-badge [state]="e.state" /></td>
+    </ng-container>
+    <ng-container matColumnDef="reason">
+      <th mat-header-cell *matHeaderCellDef>Motivo</th>
+      <td mat-cell *matCellDef="let e">{{ e.reason }}</td>
+    </ng-container>
+    <ng-container matColumnDef="attempts">
+      <th mat-header-cell *matHeaderCellDef>Intentos</th>
+      <td mat-cell *matCellDef="let e">{{ e.attempts }}</td>
+    </ng-container>
+    <ng-container matColumnDef="updated_at">
+      <th mat-header-cell *matHeaderCellDef>Actualizado</th>
+      <td mat-cell *matCellDef="let e">{{ e.updated_at | date: 'short' }}</td>
+    </ng-container>
+    <tr mat-header-row *matHeaderRowDef="timelineColumns"></tr>
+    <tr mat-row *matRowDef="let row; columns: timelineColumns"></tr>
+  </table>
+}
+
+<h2>Visor de logs en vivo</h2>
+<p class="unavailable">
+  No disponible todavia: no existe almacenamiento ni streaming de logs estructurados (ver "Pendiente conocido:
+  preparacion de backend para Entrega 3" en spec/PROJECT-MAP.md).
+</p>

@@ -1,0 +1,58 @@
+<h1>OpenCTI / Ingesta</h1>
+
+<mat-card>
+  <mat-card-content>
+    @if (status(); as s) {
+      <p>
+        Estado:
+        <app-status-badge [state]="s.paused ? 'paused' : 'ok'" />
+      </p>
+      <p>Cursor actual: {{ s.cursor_value || 'sin datos' }}</p>
+      @if (s.cursor_updated_at) {
+        <p>Ultima actualizacion del cursor: {{ s.cursor_updated_at }}</p>
+      }
+      @if (s.heartbeat_age_seconds !== null && s.heartbeat_age_seconds !== undefined) {
+        <p>Heartbeat: hace {{ s.heartbeat_age_seconds | number: '1.0-0' }}s</p>
+      }
+      @if (s.reconcile_requested) {
+        <p>Reconciliacion pendiente de aplicarse en el proximo ciclo.</p>
+      }
+      @if (s.rewind_pending) {
+        <p>Rewind pendiente de aplicarse en el proximo ciclo.</p>
+      }
+    } @else {
+      <p>Sin datos de ingestion todavia.</p>
+    }
+  </mat-card-content>
+  @if (canOperate()) {
+    <mat-card-actions>
+      @if (status()?.paused) {
+        <button mat-flat-button color="primary" (click)="resume()">Reanudar</button>
+      } @else {
+        <button mat-button (click)="pause()">Pausar</button>
+      }
+      <button mat-button (click)="reconcile()">Iniciar reconciliacion</button>
+    </mat-card-actions>
+  }
+</mat-card>
+
+@if (canRewind()) {
+  <mat-card class="rewind-card">
+    <mat-card-header>
+      <mat-card-title>Rebobinar cursor</mat-card-title>
+    </mat-card-header>
+    <mat-card-content>
+      <p class="unavailable">
+        Sin vista previa del volumen afectado todavia (no hay forma barata de contarlo sin re-consultar OpenCTI
+        extensamente). Confirma con cuidado.
+      </p>
+      <mat-form-field appearance="outline" style="width: 100%">
+        <mat-label>Cursor destino (id de evento SSE)</mat-label>
+        <input matInput [ngModel]="rewindCursor()" (ngModelChange)="rewindCursor.set($event)" />
+      </mat-form-field>
+    </mat-card-content>
+    <mat-card-actions>
+      <button mat-button color="warn" (click)="rewind()">Rebobinar</button>
+    </mat-card-actions>
+  </mat-card>
+}

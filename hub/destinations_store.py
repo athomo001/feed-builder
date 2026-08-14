@@ -13,7 +13,20 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-AdapterType = Literal["txt_feed", "http_push"]
+AdapterType = Literal[
+    "txt_feed",
+    "http_push",
+    # Entrega 4 (spec/09 "Integraciones"): variantes file_feed con formato
+    # propio (Check Point CSV, MikroTik .rsc, Wazuh CDB, STIX 2.1 bundle) y
+    # los dos api_push/servidor de alto esfuerzo (QRadar Reference Set API,
+    # servidor TAXII 2.1 propio para que Cisco TID haga poll).
+    "csv_feed",
+    "mikrotik_rsc",
+    "wazuh_cdb",
+    "stix_bundle_feed",
+    "qradar_reference_set",
+    "taxii2",
+]
 
 
 class RetryPolicy(BaseModel):

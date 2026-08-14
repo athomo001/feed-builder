@@ -1,0 +1,11 @@
+.form-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 420px;
+}
+
+.form-error {
+  color: #c62828;
+  font-size: 0.85rem;
+}

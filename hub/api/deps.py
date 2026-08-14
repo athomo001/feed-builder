@@ -20,6 +20,11 @@ class APIState:
     ledger_conn: object
     tokens_conn: object
     idempotency_conn: object
+    audit_conn: object
+    ingestion_control_conn: object
+    cursor_conn: object
+    taxii_conn: object = None
+    alerts_conn: object = None
     graphql_client: Optional[GraphQLClient] = None
     circuit_breakers: dict = None
 

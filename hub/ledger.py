@@ -128,6 +128,50 @@ def list_seen_stix_ids(conn: sqlite3.Connection) -> set:
     return {row[0] for row in rows}
 
 
+def search_deliveries(
+    conn: sqlite3.Connection,
+    *,
+    event_id: Optional[str] = None,
+    stix_id: Optional[str] = None,
+    destination_id: Optional[str] = None,
+    state: Optional[DeliveryState] = None,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[LedgerEntry]:
+    """Inspector del Event Ledger (spec/07-ADMIN-UI-ANGULAR.md "Buscador por
+    event_id, stix_id, delivery_id, destino, fuente o fecha"). Acotado a las
+    columnas que el ledger ya guarda -- no hay Canonical Event Store todavia
+    (family/subtype/valor), ver spec/PROJECT-MAP.md."""
+    clauses, params = [], []
+    if event_id is not None:
+        clauses.append("event_id = ?")
+        params.append(event_id)
+    if stix_id is not None:
+        clauses.append("stix_id = ?")
+        params.append(stix_id)
+    if destination_id is not None:
+        clauses.append("destination_id = ?")
+        params.append(destination_id)
+    if state is not None:
+        clauses.append("state = ?")
+        params.append(state.value)
+    if since is not None:
+        clauses.append("created_at >= ?")
+        params.append(since.isoformat())
+    if until is not None:
+        clauses.append("created_at <= ?")
+        params.append(until.isoformat())
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.extend([limit, offset])
+    rows = conn.execute(
+        f"SELECT {_COLUMNS} FROM event_ledger {where} ORDER BY created_at DESC LIMIT ? OFFSET ?", params
+    ).fetchall()
+    return [_row_to_entry(row) for row in rows]
+
+
 def list_dead_letters(conn: sqlite3.Connection, *, destination_id: Optional[str] = None) -> list[LedgerEntry]:
     """spec/03 'Dead-letter para intervencion manual'; spec/06 DLQ."""
     if destination_id:

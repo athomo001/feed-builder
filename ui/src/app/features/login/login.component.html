@@ -1,0 +1,37 @@
+<div class="login">
+  <mat-card class="login__card">
+    <mat-card-header>
+      <mat-card-title>OpenCTI IOC Distribution Hub</mat-card-title>
+      <mat-card-subtitle>Admin Dashboard</mat-card-subtitle>
+    </mat-card-header>
+    <mat-card-content>
+      <p>
+        Pega un API token ya generado (ver README.md &sect;14.2) y elegi el rol con el que lo creaste. El token solo se
+        guarda en memoria de esta pestana: se pierde al refrescar la pagina.
+      </p>
+
+      <mat-form-field appearance="outline" style="width: 100%">
+        <mat-label>API token</mat-label>
+        <input matInput type="password" [ngModel]="token()" (ngModelChange)="token.set($event)" autocomplete="off" />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline" style="width: 100%">
+        <mat-label>Rol del token</mat-label>
+        <mat-select [ngModel]="role()" (ngModelChange)="role.set($event)">
+          @for (r of roles; track r) {
+            <mat-option [value]="r">{{ r }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      @if (error()) {
+        <p class="login__error" role="alert">{{ error() }}</p>
+      }
+    </mat-card-content>
+    <mat-card-actions align="end">
+      <button mat-flat-button color="primary" [disabled]="checking()" (click)="submit()">
+        {{ checking() ? 'Verificando...' : 'Entrar' }}
+      </button>
+    </mat-card-actions>
+  </mat-card>
+</div>

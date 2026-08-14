@@ -1,0 +1,78 @@
+<div class="page-header">
+  <h1>Politicas</h1>
+  @if (canManage()) {
+    <button mat-flat-button color="primary" (click)="create()">
+      <mat-icon>add</mat-icon>
+      Nueva politica
+    </button>
+  }
+</div>
+
+<table mat-table [dataSource]="policies()" class="mat-elevation-z1 full-width">
+  <ng-container matColumnDef="policy_id">
+    <th mat-header-cell *matHeaderCellDef>Policy ID</th>
+    <td mat-cell *matCellDef="let p">
+      <button mat-button (click)="select(p.policy_id)">{{ p.policy_id }}</button>
+    </td>
+  </ng-container>
+  <ng-container matColumnDef="active_version">
+    <th mat-header-cell *matHeaderCellDef>Version activa</th>
+    <td mat-cell *matCellDef="let p">{{ p.active_version ?? 'ninguna' }}</td>
+  </ng-container>
+  <ng-container matColumnDef="version_count">
+    <th mat-header-cell *matHeaderCellDef># versiones</th>
+    <td mat-cell *matCellDef="let p">{{ p.version_count }}</td>
+  </ng-container>
+  <ng-container matColumnDef="actions">
+    <th mat-header-cell *matHeaderCellDef></th>
+    <td mat-cell *matCellDef="let p">
+      @if (canManage()) {
+        <button mat-button (click)="simulate(p.policy_id)">Simular</button>
+      }
+    </td>
+  </ng-container>
+
+  <tr mat-header-row *matHeaderRowDef="summaryColumns"></tr>
+  <tr mat-row *matRowDef="let row; columns: summaryColumns"></tr>
+</table>
+@if (policies().length === 0) {
+  <p>No hay politicas todavia.</p>
+}
+
+@if (selectedPolicyId(); as policyId) {
+  <h2>Versiones de "{{ policyId }}"</h2>
+  <table mat-table [dataSource]="versions()" class="mat-elevation-z1 full-width">
+    <ng-container matColumnDef="version">
+      <th mat-header-cell *matHeaderCellDef>Version</th>
+      <td mat-cell *matCellDef="let v">{{ v.version }}</td>
+    </ng-container>
+    <ng-container matColumnDef="status">
+      <th mat-header-cell *matHeaderCellDef>Estado</th>
+      <td mat-cell *matCellDef="let v"><app-status-badge [state]="v.status" /></td>
+    </ng-container>
+    <ng-container matColumnDef="created_at">
+      <th mat-header-cell *matHeaderCellDef>Creada</th>
+      <td mat-cell *matCellDef="let v">{{ v.created_at | date: 'short' }}</td>
+    </ng-container>
+    <ng-container matColumnDef="published_at">
+      <th mat-header-cell *matHeaderCellDef>Publicada</th>
+      <td mat-cell *matCellDef="let v">{{ v.published_at ? (v.published_at | date: 'short') : '-' }}</td>
+    </ng-container>
+    <ng-container matColumnDef="actions">
+      <th mat-header-cell *matHeaderCellDef></th>
+      <td mat-cell *matCellDef="let v">
+        @if (canManage()) {
+          @if (v.status === 'draft' || v.status === 'superseded' || v.status === 'rolled_back') {
+            <button mat-button color="primary" (click)="publish(v)">Publicar</button>
+          }
+          @if (v.status !== 'published' && v.status !== 'draft') {
+            <button mat-button (click)="rollback(v)">Rollback</button>
+          }
+        }
+      </td>
+    </ng-container>
+
+    <tr mat-header-row *matHeaderRowDef="versionColumns"></tr>
+    <tr mat-row *matRowDef="let row; columns: versionColumns"></tr>
+  </table>
+}

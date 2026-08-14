@@ -4,9 +4,11 @@
 carpeta propia por destino para que dos destinos `txt_feed` distintos
 (por ejemplo Fortinet y pfSense) no compartan archivos.
 
-Cubre los fabricantes `file_feed` con formato TXT/CIDR ya soportado
-(spec/05 "Modos de entrega y esfuerzo relativo": Fortinet, Palo Alto,
-Cisco Security Intelligence, pfSense/pfBlockerNG, Check Point-CSV).
+Cubre los fabricantes `file_feed` con formato TXT plano ya soportado
+(spec/05 "Modos de entrega y esfuerzo relativo": Fortinet, Palo Alto EDL,
+Cisco Security Intelligence, pfSense/pfBlockerNG -- todos "un IOC por linea").
+Check Point necesita CSV multi-columna real, no una linea por valor: eso es
+`hub/adapters/csv_feed_adapter.py` (Entrega 4), no este adapter.
 """
 import os
 from typing import Optional

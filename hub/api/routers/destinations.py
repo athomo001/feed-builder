@@ -7,11 +7,11 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 
-from hub.adapters.http_push_adapter import HttpPushAdapter
-from hub.adapters.txt_feed_adapter import TxtFeedAdapter
+from hub.adapters.factory import build_adapter
+from hub.api.audit import write_audit
 from hub.api.auth import require_role
 from hub.api.deps import APIState, get_state
 from hub.api.errors import APIError
@@ -49,9 +49,7 @@ def _is_private_endpoint(url: str) -> bool:
 
 
 def _build_adapter(destination: Destination, state: APIState):
-    if destination.adapter == "txt_feed":
-        return TxtFeedAdapter(destination, base_dir=state.config.txt_feed_dir)
-    return HttpPushAdapter(destination)
+    return build_adapter(destination, txt_feed_dir=state.config.txt_feed_dir, taxii_conn=state.taxii_conn)
 
 
 @router.get("")
@@ -70,9 +68,10 @@ def get_one(destination_id: str, state: APIState = Depends(get_state), _token=De
 @router.post("", status_code=201)
 def create(
     payload: DestinationCreate,
+    request: Request,
     state: APIState = Depends(get_state),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-    _token=Depends(require_role("security-admin")),
+    token=Depends(require_role("security-admin")),
 ):
     def compute():
         if get_destination(state.destinations_conn, payload.destination_id) is not None:
@@ -82,6 +81,11 @@ def create(
         now = datetime.now(timezone.utc)
         destination = Destination(**payload.model_dump(), paused=False, created_at=now, updated_at=now)
         upsert_destination(state.destinations_conn, destination)
+        write_audit(
+            request, state, actor=token, action="destination.create",
+            resource_type="destination", resource_id=destination.destination_id,
+            after=destination.model_dump(mode="json"),
+        )
         return 201, destination.model_dump(mode="json")
 
     status_code, body = with_idempotency(
@@ -94,9 +98,10 @@ def create(
 def update(
     destination_id: str,
     payload: DestinationUpdate,
+    request: Request,
     state: APIState = Depends(get_state),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-    _token=Depends(require_role("security-admin")),
+    token=Depends(require_role("security-admin")),
 ):
     def compute():
         existing = get_destination(state.destinations_conn, destination_id)
@@ -105,6 +110,11 @@ def update(
         updates = payload.model_dump(exclude_unset=True)
         updated = existing.model_copy(update={**updates, "updated_at": datetime.now(timezone.utc)})
         upsert_destination(state.destinations_conn, updated)
+        write_audit(
+            request, state, actor=token, action="destination.update",
+            resource_type="destination", resource_id=destination_id,
+            before=existing.model_dump(mode="json"), after=updated.model_dump(mode="json"),
+        )
         return 200, updated.model_dump(mode="json")
 
     status_code, body = with_idempotency(
@@ -143,16 +153,24 @@ def test(
 
 
 @router.post("/{destination_id}/pause")
-def pause(destination_id: str, state: APIState = Depends(get_state), _token=Depends(require_role("operator"))):
+def pause(destination_id: str, request: Request, state: APIState = Depends(get_state), token=Depends(require_role("operator"))):
     destination = set_paused(state.destinations_conn, destination_id, True)
     if destination is None:
         raise APIError(404, "Not Found", f"destination '{destination_id}' no existe", error_code="destination_not_found")
+    write_audit(
+        request, state, actor=token, action="destination.pause",
+        resource_type="destination", resource_id=destination_id,
+    )
     return destination.model_dump(mode="json")
 
 
 @router.post("/{destination_id}/resume")
-def resume(destination_id: str, state: APIState = Depends(get_state), _token=Depends(require_role("operator"))):
+def resume(destination_id: str, request: Request, state: APIState = Depends(get_state), token=Depends(require_role("operator"))):
     destination = set_paused(state.destinations_conn, destination_id, False)
     if destination is None:
         raise APIError(404, "Not Found", f"destination '{destination_id}' no existe", error_code="destination_not_found")
+    write_audit(
+        request, state, actor=token, action="destination.resume",
+        resource_type="destination", resource_id=destination_id,
+    )
     return destination.model_dump(mode="json")

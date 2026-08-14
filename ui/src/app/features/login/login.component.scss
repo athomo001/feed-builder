@@ -1,0 +1,17 @@
+.login {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.login__card {
+  max-width: 420px;
+  width: 100%;
+}
+
+.login__error {
+  color: #c62828;
+  font-size: 0.9rem;
+}

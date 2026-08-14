@@ -1,0 +1,78 @@
+<h1>Overview</h1>
+
+<div class="kpi-row">
+  <mat-card class="kpi-card">
+    <mat-card-content>
+      <div class="kpi-card__label">Ingestion OpenCTI</div>
+      <app-status-badge [state]="ingestionState()" />
+      <div class="kpi-card__meta">
+        Cursor: {{ status()?.cursor_value || 'sin datos' }}
+        @if (status()?.heartbeat_age_seconds !== null && status()?.heartbeat_age_seconds !== undefined) {
+          <span> &middot; heartbeat hace {{ status()!.heartbeat_age_seconds! | number: '1.0-0' }}s</span>
+        }
+      </div>
+    </mat-card-content>
+  </mat-card>
+
+  <mat-card class="kpi-card">
+    <mat-card-content>
+      <div class="kpi-card__label">Destinos activos</div>
+      <div class="kpi-card__value">{{ activeDestinationCount() }} / {{ destinations().length }}</div>
+    </mat-card-content>
+  </mat-card>
+
+  <mat-card class="kpi-card" [class.kpi-card--alert]="deadLetterCount() > 0">
+    <mat-card-content>
+      <div class="kpi-card__label">Dead-letter queue</div>
+      <div class="kpi-card__value">{{ deadLetterCount() }}</div>
+      <a routerLink="/operations">Ver Operaciones & DLQ</a>
+    </mat-card-content>
+  </mat-card>
+</div>
+
+@if (alerts().length > 0) {
+  <h2>Alertas activas</h2>
+  <div class="alert-list">
+    @for (alert of alerts(); track alert.alert_id) {
+      <mat-card class="alert-card">
+        <mat-card-content>
+          <app-status-badge [state]="alert.severity === 'critical' ? 'down' : alert.severity === 'warning' ? 'degraded' : 'ok'" />
+          <span class="alert-card__condition">{{ alert.condition }}</span>
+          <span class="alert-card__resource">({{ alert.component }}: {{ alert.resource_id }})</span>
+          <span class="alert-card__value">{{ alert.observed_value }}</span>
+          @if (canOperate()) {
+            <button mat-button (click)="acknowledge(alert)">Reconocer</button>
+          }
+        </mat-card-content>
+      </mat-card>
+    }
+  </div>
+}
+
+<h2>Matriz de destinos</h2>
+<table mat-table [dataSource]="destinations()" class="mat-elevation-z1 full-width">
+  <ng-container matColumnDef="destination_id">
+    <th mat-header-cell *matHeaderCellDef>Destino</th>
+    <td mat-cell *matCellDef="let d">{{ d.destination_id }}</td>
+  </ng-container>
+  <ng-container matColumnDef="adapter">
+    <th mat-header-cell *matHeaderCellDef>Adapter</th>
+    <td mat-cell *matCellDef="let d">{{ d.adapter }}</td>
+  </ng-container>
+  <ng-container matColumnDef="status">
+    <th mat-header-cell *matHeaderCellDef>Estado</th>
+    <td mat-cell *matCellDef="let d">
+      <app-status-badge [state]="d.paused ? 'paused' : d.enabled ? 'ok' : 'down'" />
+    </td>
+  </ng-container>
+  <ng-container matColumnDef="format">
+    <th mat-header-cell *matHeaderCellDef>Formato</th>
+    <td mat-cell *matCellDef="let d">{{ d.format }}</td>
+  </ng-container>
+
+  <tr mat-header-row *matHeaderRowDef="destinationColumns"></tr>
+  <tr mat-row *matRowDef="let row; columns: destinationColumns"></tr>
+</table>
+@if (destinations().length === 0) {
+  <p>No hay destinos configurados todavia. Anda a "Destinos" para crear el primero.</p>
+}

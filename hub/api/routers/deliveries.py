@@ -5,10 +5,10 @@ es `event_id + destination_id + policy_version`, spec/03); se codifica como
 """
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
-from hub.adapters.http_push_adapter import HttpPushAdapter
-from hub.adapters.txt_feed_adapter import TxtFeedAdapter
+from hub.adapters.factory import build_adapter, uses_circuit_breaker
+from hub.api.audit import write_audit
 from hub.api.auth import require_role
 from hub.api.deps import APIState, get_state
 from hub.api.errors import APIError
@@ -48,7 +48,7 @@ def dead_letters(state: APIState = Depends(get_state), _token=Depends(require_ro
 
 
 @router.post("/{delivery_id}/retry")
-def retry(delivery_id: str, state: APIState = Depends(get_state), _token=Depends(require_role("operator"))):
+def retry(delivery_id: str, request: Request, state: APIState = Depends(get_state), token=Depends(require_role("operator"))):
     event_id, destination_id, policy_version = _parse_delivery_id(delivery_id)
     entry = get_delivery(state.ledger_conn, event_id, destination_id, policy_version)
     if entry is None:
@@ -77,12 +77,8 @@ def retry(delivery_id: str, state: APIState = Depends(get_state), _token=Depends
     envelope = indicator_node_to_envelope(node, action="create")
     event = normalize_stix_indicator(envelope, event_id=event_id, source_id=state.config.source_id)
 
-    if destination.adapter == "txt_feed":
-        adapter = TxtFeedAdapter(destination, base_dir=state.config.txt_feed_dir)
-        breaker = None
-    else:
-        adapter = HttpPushAdapter(destination)
-        breaker = state.circuit_breakers.setdefault(destination_id, CircuitBreaker())
+    adapter = build_adapter(destination, txt_feed_dir=state.config.txt_feed_dir, taxii_conn=state.taxii_conn)
+    breaker = state.circuit_breakers.setdefault(destination_id, CircuitBreaker()) if uses_circuit_breaker(destination) else None
 
     updated = deliver(
         ledger_conn=state.ledger_conn,
@@ -93,6 +89,12 @@ def retry(delivery_id: str, state: APIState = Depends(get_state), _token=Depends
         max_attempts=destination.retry.max_attempts,
         circuit_breaker=breaker,
     )
+    write_audit(
+        request, state, actor=token, action="delivery.retry",
+        resource_type="delivery", resource_id=delivery_id,
+        before={"state": entry.state.value, "attempts": entry.attempts},
+        after={"state": updated.state.value, "attempts": updated.attempts},
+    )
     return updated.model_dump(mode="json")
 
 
@@ -100,8 +102,9 @@ def retry(delivery_id: str, state: APIState = Depends(get_state), _token=Depends
 def discard(
     delivery_id: str,
     payload: DiscardRequest,
+    request: Request,
     state: APIState = Depends(get_state),
-    _token=Depends(require_role("operator")),
+    token=Depends(require_role("operator")),
 ):
     event_id, destination_id, policy_version = _parse_delivery_id(delivery_id)
     entry = get_delivery(state.ledger_conn, event_id, destination_id, policy_version)
@@ -117,4 +120,10 @@ def discard(
         }
     )
     upsert_delivery(state.ledger_conn, updated)
+    write_audit(
+        request, state, actor=token, action="delivery.discard",
+        resource_type="delivery", resource_id=delivery_id,
+        before={"state": entry.state.value}, after={"state": updated.state.value},
+        reason=payload.reason,
+    )
     return updated.model_dump(mode="json")

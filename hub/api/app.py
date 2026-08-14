@@ -16,17 +16,22 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from hub import __version__
+from hub.api.audit_store import init_db as init_audit_db
 from hub.api.deps import APIState
 from hub.api.errors import api_error_handler, APIError, http_exception_handler, validation_exception_handler
 from hub.api.idempotency_store import init_db as init_idempotency_db
-from hub.api.routers import deliveries, destinations, feeds, health, policies
+from hub.api.routers import alerts, audit, deliveries, destinations, events, feeds, health, ingestion, policies, taxii
 from hub.api.token_store import init_db as init_tokens_db
 from hub.config import HubConfig
+from hub.cursor_store import init_db as init_cursor_db
 from hub.destinations_store import init_db as init_destinations_db
 from hub.errors import ProblemDetail
 from hub.graphql_client import GraphQLClient
+from hub.alerting_store import init_db as init_alerts_db
+from hub.ingestion_control import init_db as init_ingestion_control_db
 from hub.ledger import init_db as init_ledger_db
 from hub.policy_store import init_db as init_policies_db
+from hub.taxii_store import init_db as init_taxii_db
 
 
 class _InMemoryRateLimiter:
@@ -68,6 +73,11 @@ def create_app(config: HubConfig) -> FastAPI:
         ledger_conn=init_ledger_db(os.path.join(config.state_dir, "ledger.sqlite3")),
         tokens_conn=init_tokens_db(os.path.join(config.state_dir, "tokens.sqlite3")),
         idempotency_conn=init_idempotency_db(os.path.join(config.state_dir, "idempotency.sqlite3")),
+        audit_conn=init_audit_db(os.path.join(config.state_dir, "audit.sqlite3")),
+        ingestion_control_conn=init_ingestion_control_db(os.path.join(config.state_dir, "ingestion_control.sqlite3")),
+        cursor_conn=init_cursor_db(os.path.join(config.state_dir, "cursor.sqlite3")),
+        taxii_conn=init_taxii_db(os.path.join(config.state_dir, "taxii.sqlite3")),
+        alerts_conn=init_alerts_db(os.path.join(config.state_dir, "alerts.sqlite3")),
         graphql_client=GraphQLClient(config.opencti_url, config.opencti_token, verify=config.verify),
     )
     app.state.rate_limiter = _InMemoryRateLimiter()
@@ -76,9 +86,16 @@ def create_app(config: HubConfig) -> FastAPI:
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
-    # spec/08 "CORS cerrado a origen de UI": sin UI todavia (Entrega 3),
-    # cerrado por defecto -- ningun origen de navegador permitido.
-    app.add_middleware(CORSMiddleware, allow_origins=[], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+    # spec/08 "CORS cerrado a origen de UI": cerrado por defecto (lista
+    # vacia si ADMIN_UI_ORIGINS no esta seteado), habilitado solo al origen
+    # real de la UI Angular cuando se configura (ver README.md 15).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=config.admin_ui_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.middleware("http")
     async def _correlation_and_security(request: Request, call_next):
@@ -121,5 +138,10 @@ def create_app(config: HubConfig) -> FastAPI:
     app.include_router(policies.router)
     app.include_router(deliveries.router)
     app.include_router(feeds.router)
+    app.include_router(audit.router)
+    app.include_router(events.router)
+    app.include_router(ingestion.router)
+    app.include_router(taxii.router)
+    app.include_router(alerts.router)
 
     return app

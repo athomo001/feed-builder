@@ -1,0 +1,34 @@
+<h2 mat-dialog-title>Nueva politica (borrador)</h2>
+<mat-dialog-content class="form-grid">
+  <mat-form-field appearance="outline">
+    <mat-label>policy_id</mat-label>
+    <input matInput [ngModel]="policyId()" (ngModelChange)="policyId.set($event)" />
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Destino</mat-label>
+    <mat-select [ngModel]="destinationId()" (ngModelChange)="destinationId.set($event)">
+      @for (d of data.destinations; track d.destination_id) {
+        <mat-option [value]="d.destination_id">{{ d.destination_id }} ({{ d.name }})</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>allowed_iocs (JSON)</mat-label>
+    <textarea matInput rows="3" [ngModel]="allowedIocsJson()" (ngModelChange)="allowedIocsJson.set($event)"></textarea>
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>ttl_days (JSON)</mat-label>
+    <textarea matInput rows="2" [ngModel]="ttlDaysJson()" (ngModelChange)="ttlDaysJson.set($event)"></textarea>
+  </mat-form-field>
+
+  @if (jsonError()) {
+    <p class="form-error" role="alert">{{ jsonError() }}</p>
+  }
+</mat-dialog-content>
+<mat-dialog-actions align="end">
+  <button mat-button (click)="cancel()">Cancelar</button>
+  <button mat-flat-button color="primary" (click)="save()">Crear borrador</button>
+</mat-dialog-actions>

@@ -4,9 +4,10 @@ lectura.
 """
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 
+from hub.api.audit import write_audit
 from hub.api.auth import require_role
 from hub.api.deps import APIState, get_state
 from hub.api.errors import APIError
@@ -51,9 +52,10 @@ def versions(policy_id: str, state: APIState = Depends(get_state), _token=Depend
 @router.post("", status_code=201)
 def create(
     payload: PolicyCreate,
+    request: Request,
     state: APIState = Depends(get_state),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-    _token=Depends(require_role("policy-admin")),
+    token=Depends(require_role("policy-admin")),
 ):
     def compute():
         if get_destination(state.destinations_conn, payload.destination_id) is None:
@@ -67,6 +69,11 @@ def create(
             destination_id=payload.destination_id,
             allowed_iocs=payload.allowed_iocs,
             ttl_days=payload.ttl_days,
+        )
+        write_audit(
+            request, state, actor=token, action="policy.create_draft",
+            resource_type="policy", resource_id=f"{version.policy_id}@v{version.version}",
+            after=version.model_dump(mode="json"),
         )
         return 201, version.model_dump(mode="json")
 
@@ -103,14 +110,23 @@ def simulate(
 def publish_version(
     policy_id: str,
     payload: VersionRequest,
+    request: Request,
     state: APIState = Depends(get_state),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-    _token=Depends(require_role("policy-admin")),
+    token=Depends(require_role("policy-admin")),
 ):
     def compute():
+        previously_active = get_active_version(state.policies_conn, policy_id)
         if get_version(state.policies_conn, policy_id, payload.version) is None:
             raise APIError(404, "Not Found", f"policy '{policy_id}' version {payload.version} no existe", error_code="policy_version_not_found")
         version = publish(state.policies_conn, policy_id, payload.version)
+        write_audit(
+            request, state, actor=token, action="policy.publish",
+            resource_type="policy", resource_id=f"{policy_id}@v{payload.version}",
+            before={"active_version": previously_active.version if previously_active else None},
+            after={"active_version": version.version},
+            reason=payload.reason,
+        )
         return 200, version.model_dump(mode="json")
 
     status_code, body = with_idempotency(
@@ -127,14 +143,23 @@ def publish_version(
 def rollback_version(
     policy_id: str,
     payload: VersionRequest,
+    request: Request,
     state: APIState = Depends(get_state),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-    _token=Depends(require_role("policy-admin")),
+    token=Depends(require_role("policy-admin")),
 ):
     def compute():
+        previously_active = get_active_version(state.policies_conn, policy_id)
         if get_version(state.policies_conn, policy_id, payload.version) is None:
             raise APIError(404, "Not Found", f"policy '{policy_id}' version {payload.version} no existe", error_code="policy_version_not_found")
         version = rollback(state.policies_conn, policy_id, payload.version)
+        write_audit(
+            request, state, actor=token, action="policy.rollback",
+            resource_type="policy", resource_id=f"{policy_id}@v{payload.version}",
+            before={"active_version": previously_active.version if previously_active else None},
+            after={"active_version": version.version},
+            reason=payload.reason,
+        )
         return 200, version.model_dump(mode="json")
 
     status_code, body = with_idempotency(

@@ -66,6 +66,12 @@ class SimulateRequest(_Forbid):
 
 class VersionRequest(_Forbid):
     version: int
+    reason: str
+
+
+class RewindRequest(_Forbid):
+    cursor_value: str
+    reason: str
 
 
 class DiscardRequest(_Forbid):

@@ -1,0 +1,84 @@
+<h1>Operaciones & DLQ</h1>
+
+<h2>Dead-letter queue</h2>
+<table mat-table [dataSource]="deadLetters()" class="mat-elevation-z1 full-width">
+  <ng-container matColumnDef="event_id">
+    <th mat-header-cell *matHeaderCellDef>Event ID</th>
+    <td mat-cell *matCellDef="let e">{{ e.event_id }}</td>
+  </ng-container>
+  <ng-container matColumnDef="stix_id">
+    <th mat-header-cell *matHeaderCellDef>STIX ID</th>
+    <td mat-cell *matCellDef="let e">{{ e.stix_id }}</td>
+  </ng-container>
+  <ng-container matColumnDef="destination_id">
+    <th mat-header-cell *matHeaderCellDef>Destino</th>
+    <td mat-cell *matCellDef="let e">{{ e.destination_id }}</td>
+  </ng-container>
+  <ng-container matColumnDef="state">
+    <th mat-header-cell *matHeaderCellDef>Estado</th>
+    <td mat-cell *matCellDef="let e"><app-status-badge [state]="e.state" /></td>
+  </ng-container>
+  <ng-container matColumnDef="attempts">
+    <th mat-header-cell *matHeaderCellDef>Intentos</th>
+    <td mat-cell *matCellDef="let e">{{ e.attempts }}</td>
+  </ng-container>
+  <ng-container matColumnDef="error">
+    <th mat-header-cell *matHeaderCellDef>Error</th>
+    <td mat-cell *matCellDef="let e">{{ e.error || '-' }}</td>
+  </ng-container>
+  <ng-container matColumnDef="actions">
+    <th mat-header-cell *matHeaderCellDef></th>
+    <td mat-cell *matCellDef="let e">
+      @if (canOperate()) {
+        <button mat-button color="primary" (click)="retry(e)">Reintentar</button>
+        <button mat-button (click)="discard(e)">Descartar</button>
+      }
+    </td>
+  </ng-container>
+
+  <tr mat-header-row *matHeaderRowDef="dlqColumns"></tr>
+  <tr mat-row *matRowDef="let row; columns: dlqColumns"></tr>
+</table>
+@if (deadLetters().length === 0) {
+  <p>Sin entregas en dead-letter.</p>
+}
+
+<h2>Feeds materializados</h2>
+<table mat-table [dataSource]="feeds()" class="mat-elevation-z1 full-width">
+  <ng-container matColumnDef="feed_id">
+    <th mat-header-cell *matHeaderCellDef>Feed</th>
+    <td mat-cell *matCellDef="let f">{{ f.feed_id }}</td>
+  </ng-container>
+  <ng-container matColumnDef="destination_id">
+    <th mat-header-cell *matHeaderCellDef>Destino</th>
+    <td mat-cell *matCellDef="let f">{{ f.destination_id }}</td>
+  </ng-container>
+  <ng-container matColumnDef="subtype">
+    <th mat-header-cell *matHeaderCellDef>Subtipo</th>
+    <td mat-cell *matCellDef="let f">{{ f.subtype }}</td>
+  </ng-container>
+  <ng-container matColumnDef="entries">
+    <th mat-header-cell *matHeaderCellDef>Entradas</th>
+    <td mat-cell *matCellDef="let f">{{ f.entries }}</td>
+  </ng-container>
+  <ng-container matColumnDef="actions">
+    <th mat-header-cell *matHeaderCellDef></th>
+    <td mat-cell *matCellDef="let f">
+      <button mat-button (click)="preview(f)">Ver preview</button>
+      @if (canOperate()) {
+        <button mat-button (click)="rebuild(f)">Forzar reconstruccion</button>
+      }
+    </td>
+  </ng-container>
+
+  <tr mat-header-row *matHeaderRowDef="feedColumns"></tr>
+  <tr mat-row *matRowDef="let row; columns: feedColumns"></tr>
+</table>
+@if (feeds().length === 0) {
+  <p>Sin feeds materializados todavia.</p>
+}
+
+@if (previewFeedId(); as feedId) {
+  <h3>Preview de "{{ feedId }}"</h3>
+  <pre class="preview">{{ previewLines().join('\n') }}</pre>
+}

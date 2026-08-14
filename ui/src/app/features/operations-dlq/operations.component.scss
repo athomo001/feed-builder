@@ -1,0 +1,12 @@
+.full-width {
+  width: 100%;
+  margin-bottom: 2rem;
+}
+
+.preview {
+  background: var(--mat-sys-surface-container);
+  padding: 1rem;
+  border-radius: 4px;
+  max-height: 240px;
+  overflow: auto;
+}

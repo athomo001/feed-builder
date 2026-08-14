@@ -18,24 +18,24 @@ services:
     environment:
       - OPENCTI_URL=${OPENCTI_URL}
       - OPENCTI_SERVICE_ACCOUNT_TOKEN=${OPENCTI_SERVICE_ACCOUNT_TOKEN}
-      - OPENCTI_STREAM_ID=${OPENCTI_STREAM_ID}
+      - OPENCTI_STREAM_ID=${OPENCTI_STREAM_ID:-}
       - OPENCTI_TLS_VERIFY=${OPENCTI_TLS_VERIFY:-true}
       - HUB_STATE_DIR=/state
       - TXT_FEED_DIR=/feeds
       - HUB_SOURCE_ID=${HUB_SOURCE_ID:-opencti-main}
       - RECONCILE_INTERVAL_SECONDS=${RECONCILE_INTERVAL_SECONDS:-600}
       - ALERT_COOLDOWN_SECONDS=${ALERT_COOLDOWN_SECONDS:-300}
-      - ALERT_SMTP_HOST=${ALERT_SMTP_HOST}
+      - ALERT_SMTP_HOST=${ALERT_SMTP_HOST:-}
       - ALERT_SMTP_PORT=${ALERT_SMTP_PORT:-25}
-      - ALERT_EMAIL_FROM=${ALERT_EMAIL_FROM}
-      - ALERT_EMAIL_TO=${ALERT_EMAIL_TO}
-      - ALERT_EMAIL_CREDENTIAL_REF=${ALERT_EMAIL_CREDENTIAL_REF}
-      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL}
-      - ALERT_WEBHOOK_CREDENTIAL_REF=${ALERT_WEBHOOK_CREDENTIAL_REF}
-      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - ALERT_EMAIL_FROM=${ALERT_EMAIL_FROM:-}
+      - ALERT_EMAIL_TO=${ALERT_EMAIL_TO:-}
+      - ALERT_EMAIL_CREDENTIAL_REF=${ALERT_EMAIL_CREDENTIAL_REF:-}
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
+      - ALERT_WEBHOOK_CREDENTIAL_REF=${ALERT_WEBHOOK_CREDENTIAL_REF:-}
+      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY:-}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     volumes:
-      - ${HUB_APP_PATH}:/app:ro
+      - ${HUB_APP_PATH:-.}:/app:ro
       - hub_state:/state
       - hub_feeds:/feeds
     working_dir: /app
@@ -71,23 +71,27 @@ services:
       - TXT_FEED_DIR=/feeds
       - HUB_API_HOST=0.0.0.0
       - HUB_API_PORT=8000
-      - ADMIN_UI_ORIGINS=${ADMIN_UI_ORIGINS}
-      - ALERT_SMTP_HOST=${ALERT_SMTP_HOST}
+      # Por defecto, el mismo origen donde nginx sirve la UI y expone
+      # /admin/api/ (mismo origen = el navegador ni pide CORS). Solo hace
+      # falta declarar ADMIN_UI_ORIGINS en .env si la UI se sirve desde otro
+      # origen (por ejemplo, `ng serve` en desarrollo).
+      - ADMIN_UI_ORIGINS=${ADMIN_UI_ORIGINS:-https://${PUBLIC_HOST}:${NGINX_HTTPS_PORT:-8446}}
+      - ALERT_SMTP_HOST=${ALERT_SMTP_HOST:-}
       - ALERT_SMTP_PORT=${ALERT_SMTP_PORT:-25}
-      - ALERT_EMAIL_FROM=${ALERT_EMAIL_FROM}
-      - ALERT_EMAIL_TO=${ALERT_EMAIL_TO}
-      - ALERT_EMAIL_CREDENTIAL_REF=${ALERT_EMAIL_CREDENTIAL_REF}
-      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL}
-      - ALERT_WEBHOOK_CREDENTIAL_REF=${ALERT_WEBHOOK_CREDENTIAL_REF}
-      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY}
-      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL}
-      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
-      - OIDC_CLIENT_SECRET_REF=${OIDC_CLIENT_SECRET_REF}
-      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI}
-      - OIDC_ROLE_MAPPING=${OIDC_ROLE_MAPPING}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - ALERT_EMAIL_FROM=${ALERT_EMAIL_FROM:-}
+      - ALERT_EMAIL_TO=${ALERT_EMAIL_TO:-}
+      - ALERT_EMAIL_CREDENTIAL_REF=${ALERT_EMAIL_CREDENTIAL_REF:-}
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
+      - ALERT_WEBHOOK_CREDENTIAL_REF=${ALERT_WEBHOOK_CREDENTIAL_REF:-}
+      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY:-}
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
+      - OIDC_CLIENT_SECRET_REF=${OIDC_CLIENT_SECRET_REF:-}
+      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-}
+      - OIDC_ROLE_MAPPING=${OIDC_ROLE_MAPPING:-}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     volumes:
-      - ${HUB_APP_PATH}:/app:ro
+      - ${HUB_APP_PATH:-.}:/app:ro
       - hub_state:/state
       - hub_feeds:/feeds
     working_dir: /app
@@ -115,7 +119,7 @@ services:
     restart: always
     environment:
       - PUBLIC_HOST=${PUBLIC_HOST}
-      - NGINX_HTTPS_PORT=${NGINX_HTTPS_PORT}
+      - NGINX_HTTPS_PORT=${NGINX_HTTPS_PORT:-8446}
     entrypoint: ["/bin/sh", "-c"]
     # command como lista de UN elemento: si fuera un string plano, Compose lo
     # parte con shlex antes de pasarlo a "sh -c", y "<"/">"/"&&" dejan de
@@ -123,12 +127,12 @@ services:
     # ejecuta el primer argumento). Con un solo elemento no hay split.
     command: ["envsubst '$$PUBLIC_HOST $$NGINX_HTTPS_PORT' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"]
     ports:
-      - "${NGINX_HTTPS_PORT}:443"
+      - "${NGINX_HTTPS_PORT:-8446}:443"
     volumes:
-      - ${NGINX_CONF_PATH}:/etc/nginx/nginx.conf.template:ro
-      - ${NGINX_CERTS_PATH}:/etc/nginx/certs:ro
+      - ${NGINX_CONF_PATH:-./nginx.conf}:/etc/nginx/nginx.conf.template:ro
+      - ${NGINX_CERTS_PATH:-./certs}:/etc/nginx/certs:ro
       - hub_feeds:/usr/share/nginx/html/feeds:ro
-      - ${UI_DIST_PATH}:/usr/share/nginx/html/ui:ro
+      - ${UI_DIST_PATH:-./ui/dist/ui/browser}:/usr/share/nginx/html/ui:ro
     healthcheck:
       # -k porque el certificado puede ser autofirmado; ejercita TLS +
       # el reverse-proxy a hub-api en un solo golpe (nginx:stable trae curl).

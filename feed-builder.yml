@@ -18,7 +18,7 @@ services:
       - TXT_FEED_DIR=/feeds
       - HUB_SOURCE_ID=${HUB_SOURCE_ID:-opencti-main}
     volumes:
-      - ${HUB_APP_PATH}:/app:ro
+      - ${HUB_APP_PATH:-.}:/app:ro
       - hub_state:/state
       - hub_feeds:/feeds
     working_dir: /app
@@ -53,7 +53,7 @@ services:
       - HUB_API_PORT=8000
       - ADMIN_UI_ORIGINS=${ADMIN_UI_ORIGINS}
     volumes:
-      - ${HUB_APP_PATH}:/app:ro
+      - ${HUB_APP_PATH:-.}:/app:ro
       - hub_state:/state
       - hub_feeds:/feeds
     working_dir: /app

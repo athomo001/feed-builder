@@ -35,10 +35,7 @@ Ver secciones 13 en adelante para la arquitectura real y vigente del Hub (`hub/`
 
 - Docker Engine + Docker Compose.
 - Una instancia de OpenCTI ya desplegada y accesible (por `OPENCTI_URL`), con un token de cuenta de servicio no administrativa.
-- Volúmenes/rutas de host disponibles para (ver `.env.example`):
-  - `HUB_APP_PATH` (código del repo, con `hub/`)
-  - `UI_DIST_PATH` (salida de `ng build`, ver sección 15.2)
-  - `NGINX_CONF_PATH`, `NGINX_CERTS_PATH` (certificado y llave TLS)
+- Por defecto todo se resuelve relativo a este repo, sin tocar nada: el código (`hub/`) desde `.`, el build de `ng build` desde `./ui/dist/ui/browser`, `nginx.conf` desde `./nginx.conf` y los certificados TLS desde `./certs/`. Solo hace falta declarar `HUB_APP_PATH`/`UI_DIST_PATH`/`NGINX_CONF_PATH`/`NGINX_CERTS_PATH` en `.env` si tu despliegue guarda alguna de esas carpetas en otro lugar (ver `.env.example`).
 - Si el Hub está co-ubicado con OpenCTI en el mismo host: acceso a la red Docker externa de OpenCTI (`OPENCTI_DOCKER_NETWORK`). Si es remoto: solo necesita alcanzar `OPENCTI_URL` por HTTPS.
 
 ## 4.2 Requisitos de OpenCTI

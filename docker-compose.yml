@@ -1,39 +1,47 @@
-services:
+########################################################################
+# HUB (esta integracion)
+########################################################################
+# Este compose levanta SOLO el Hub de distribucion de IOC (el paquete
+# hub/, reemplazo del script legado opencti_feed_builder.py). OpenCTI ya
+# esta desplegado por su cuenta -- este proyecto es una integracion sobre
+# el, no un despliegue de OpenCTI en si. Si OpenCTI corre en un Docker
+# host distinto, alcanza con configurar OPENCTI_URL/PUBLIC_HOST en .env y
+# borrar el bloque "external network" de abajo. Si corre co-ubicado en el
+# mismo host, unirse a la red externa de OpenCTI (OPENCTI_DOCKER_NETWORK)
+# deja resolver su nombre de servicio directo.
+#
+# Variables de entorno compartidas entre hub-service y hub-api (no llevan
+# "x-" un significado especial para Compose -- es la convencion para
+# bloques reusables via el merge key YAML "<<", asi no se repite cada
+# variable en los dos servicios). Cada servicio solo agrega abajo lo que
+# le es propio (puerto, stream, OIDC, etc.).
+x-hub-common-env: &hub-common-env
+  OPENCTI_URL: ${OPENCTI_URL}
+  OPENCTI_SERVICE_ACCOUNT_TOKEN: ${OPENCTI_SERVICE_ACCOUNT_TOKEN}
+  OPENCTI_TLS_VERIFY: ${OPENCTI_TLS_VERIFY:-true}
+  HUB_STATE_DIR: /state
+  TXT_FEED_DIR: /feeds
+  ALERT_SMTP_HOST: ${ALERT_SMTP_HOST:-}
+  ALERT_SMTP_PORT: ${ALERT_SMTP_PORT:-25}
+  ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
+  ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+  ALERT_EMAIL_CREDENTIAL_REF: ${ALERT_EMAIL_CREDENTIAL_REF:-}
+  ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+  ALERT_WEBHOOK_CREDENTIAL_REF: ${ALERT_WEBHOOK_CREDENTIAL_REF:-}
+  SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
 
-  ###########################
-  # HUB (esta integracion)  #
-  ###########################
-  # Este compose levanta SOLO el Hub de distribucion de IOC (el paquete
-  # hub/, reemplazo del script legado opencti_feed_builder.py). OpenCTI ya
-  # esta desplegado por su cuenta -- este proyecto es una integracion sobre
-  # el, no un despliegue de OpenCTI en si. Si OpenCTI corre en un Docker
-  # host distinto, alcanza con configurar OPENCTI_URL/PUBLIC_HOST en .env y
-  # borrar el bloque "external network" de abajo. Si corre co-ubicado en el
-  # mismo host, unirse a la red externa de OpenCTI (OPENCTI_DOCKER_NETWORK)
-  # deja resolver su nombre de servicio directo.
+services:
 
   hub-service:
     image: python:3.12-slim
     restart: always
     environment:
-      - OPENCTI_URL=${OPENCTI_URL}
-      - OPENCTI_SERVICE_ACCOUNT_TOKEN=${OPENCTI_SERVICE_ACCOUNT_TOKEN}
-      - OPENCTI_STREAM_ID=${OPENCTI_STREAM_ID:-}
-      - OPENCTI_TLS_VERIFY=${OPENCTI_TLS_VERIFY:-true}
-      - HUB_STATE_DIR=/state
-      - TXT_FEED_DIR=/feeds
-      - HUB_SOURCE_ID=${HUB_SOURCE_ID:-opencti-main}
-      - RECONCILE_INTERVAL_SECONDS=${RECONCILE_INTERVAL_SECONDS:-600}
-      - ALERT_COOLDOWN_SECONDS=${ALERT_COOLDOWN_SECONDS:-300}
-      - ALERT_SMTP_HOST=${ALERT_SMTP_HOST:-}
-      - ALERT_SMTP_PORT=${ALERT_SMTP_PORT:-25}
-      - ALERT_EMAIL_FROM=${ALERT_EMAIL_FROM:-}
-      - ALERT_EMAIL_TO=${ALERT_EMAIL_TO:-}
-      - ALERT_EMAIL_CREDENTIAL_REF=${ALERT_EMAIL_CREDENTIAL_REF:-}
-      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
-      - ALERT_WEBHOOK_CREDENTIAL_REF=${ALERT_WEBHOOK_CREDENTIAL_REF:-}
-      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY:-}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      <<: *hub-common-env
+      OPENCTI_STREAM_ID: ${OPENCTI_STREAM_ID:-}
+      HUB_SOURCE_ID: ${HUB_SOURCE_ID:-opencti-main}
+      RECONCILE_INTERVAL_SECONDS: ${RECONCILE_INTERVAL_SECONDS:-600}
+      ALERT_COOLDOWN_SECONDS: ${ALERT_COOLDOWN_SECONDS:-300}
     volumes:
       - ${HUB_APP_PATH:-.}:/app:ro
       - hub_state:/state
@@ -64,32 +72,19 @@ services:
       hub-service:
         condition: service_started
     environment:
-      - OPENCTI_URL=${OPENCTI_URL}
-      - OPENCTI_SERVICE_ACCOUNT_TOKEN=${OPENCTI_SERVICE_ACCOUNT_TOKEN}
-      - OPENCTI_TLS_VERIFY=${OPENCTI_TLS_VERIFY:-true}
-      - HUB_STATE_DIR=/state
-      - TXT_FEED_DIR=/feeds
-      - HUB_API_HOST=0.0.0.0
-      - HUB_API_PORT=8000
+      <<: *hub-common-env
+      HUB_API_HOST: 0.0.0.0
+      HUB_API_PORT: 8000
       # Por defecto, el mismo origen donde nginx sirve la UI y expone
       # /admin/api/ (mismo origen = el navegador ni pide CORS). Solo hace
-      # falta declarar ADMIN_UI_ORIGINS en .env si la UI se sirve desde otro
-      # origen (por ejemplo, `ng serve` en desarrollo).
-      - ADMIN_UI_ORIGINS=${ADMIN_UI_ORIGINS:-https://${PUBLIC_HOST}:${NGINX_HTTPS_PORT:-8446}}
-      - ALERT_SMTP_HOST=${ALERT_SMTP_HOST:-}
-      - ALERT_SMTP_PORT=${ALERT_SMTP_PORT:-25}
-      - ALERT_EMAIL_FROM=${ALERT_EMAIL_FROM:-}
-      - ALERT_EMAIL_TO=${ALERT_EMAIL_TO:-}
-      - ALERT_EMAIL_CREDENTIAL_REF=${ALERT_EMAIL_CREDENTIAL_REF:-}
-      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
-      - ALERT_WEBHOOK_CREDENTIAL_REF=${ALERT_WEBHOOK_CREDENTIAL_REF:-}
-      - SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY:-}
-      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
-      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
-      - OIDC_CLIENT_SECRET_REF=${OIDC_CLIENT_SECRET_REF:-}
-      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-}
-      - OIDC_ROLE_MAPPING=${OIDC_ROLE_MAPPING:-}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      # falta declarar ADMIN_UI_ORIGINS en .env si la UI se sirve desde
+      # otro origen (por ejemplo, `ng serve` en desarrollo).
+      ADMIN_UI_ORIGINS: ${ADMIN_UI_ORIGINS:-https://${PUBLIC_HOST}:${NGINX_HTTPS_PORT:-8446}}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET_REF: ${OIDC_CLIENT_SECRET_REF:-}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
+      OIDC_ROLE_MAPPING: ${OIDC_ROLE_MAPPING:-}
     volumes:
       - ${HUB_APP_PATH:-.}:/app:ro
       - hub_state:/state

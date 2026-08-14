@@ -3,20 +3,34 @@
 #   docker compose -f feed-builder.yml up -d
 # Sirve para recuperar rapidamente estos dos servicios si el compose
 # principal (docker-compose.yml) se pierde o queda en mal estado --
-# mantener sincronizado con el cuando cambien variables, volumenes o
-# command de hub-service/hub-api.
+# mantener sincronizado con el (mismas variables/defaults) cuando cambien
+# variables, volumenes o command de hub-service/hub-api.
+x-hub-common-env: &hub-common-env
+  OPENCTI_URL: ${OPENCTI_URL}
+  OPENCTI_SERVICE_ACCOUNT_TOKEN: ${OPENCTI_SERVICE_ACCOUNT_TOKEN}
+  OPENCTI_TLS_VERIFY: ${OPENCTI_TLS_VERIFY:-true}
+  HUB_STATE_DIR: /state
+  TXT_FEED_DIR: /feeds
+  ALERT_SMTP_HOST: ${ALERT_SMTP_HOST:-}
+  ALERT_SMTP_PORT: ${ALERT_SMTP_PORT:-25}
+  ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
+  ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+  ALERT_EMAIL_CREDENTIAL_REF: ${ALERT_EMAIL_CREDENTIAL_REF:-}
+  ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+  ALERT_WEBHOOK_CREDENTIAL_REF: ${ALERT_WEBHOOK_CREDENTIAL_REF:-}
+  SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
 services:
   hub-service:
     image: python:3.12-slim
     restart: always
     environment:
-      - OPENCTI_URL=${OPENCTI_URL}
-      - OPENCTI_SERVICE_ACCOUNT_TOKEN=${OPENCTI_SERVICE_ACCOUNT_TOKEN}
-      - OPENCTI_STREAM_ID=${OPENCTI_STREAM_ID}
-      - OPENCTI_TLS_VERIFY=${OPENCTI_TLS_VERIFY:-true}
-      - HUB_STATE_DIR=/state
-      - TXT_FEED_DIR=/feeds
-      - HUB_SOURCE_ID=${HUB_SOURCE_ID:-opencti-main}
+      <<: *hub-common-env
+      OPENCTI_STREAM_ID: ${OPENCTI_STREAM_ID:-}
+      HUB_SOURCE_ID: ${HUB_SOURCE_ID:-opencti-main}
+      RECONCILE_INTERVAL_SECONDS: ${RECONCILE_INTERVAL_SECONDS:-600}
+      ALERT_COOLDOWN_SECONDS: ${ALERT_COOLDOWN_SECONDS:-300}
     volumes:
       - ${HUB_APP_PATH:-.}:/app:ro
       - hub_state:/state
@@ -45,13 +59,15 @@ services:
       hub-service:
         condition: service_started
     environment:
-      - OPENCTI_URL=${OPENCTI_URL}
-      - OPENCTI_SERVICE_ACCOUNT_TOKEN=${OPENCTI_SERVICE_ACCOUNT_TOKEN}
-      - HUB_STATE_DIR=/state
-      - TXT_FEED_DIR=/feeds
-      - HUB_API_HOST=0.0.0.0
-      - HUB_API_PORT=8000
-      - ADMIN_UI_ORIGINS=${ADMIN_UI_ORIGINS}
+      <<: *hub-common-env
+      HUB_API_HOST: 0.0.0.0
+      HUB_API_PORT: 8000
+      ADMIN_UI_ORIGINS: ${ADMIN_UI_ORIGINS:-https://${PUBLIC_HOST}:${NGINX_HTTPS_PORT:-8446}}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET_REF: ${OIDC_CLIENT_SECRET_REF:-}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
+      OIDC_ROLE_MAPPING: ${OIDC_ROLE_MAPPING:-}
     volumes:
       - ${HUB_APP_PATH:-.}:/app:ro
       - hub_state:/state

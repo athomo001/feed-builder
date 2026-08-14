@@ -32,3 +32,4 @@ spec/
 .claude/
 AUDITORIA.md
 tests/
+.agents/

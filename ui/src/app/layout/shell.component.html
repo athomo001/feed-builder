@@ -14,7 +14,19 @@
   <mat-sidenav-content>
     <mat-toolbar class="shell__toolbar">
       <span class="shell__spacer"></span>
-      <span class="shell__role">Rol: {{ role() }}</span>
+      <span class="shell__role">
+        Rol:
+        <mat-select
+          class="shell__role-select"
+          [ngModel]="role()"
+          (ngModelChange)="setDisplayRole($event)"
+          [attr.aria-label]="'Cambiar rol mostrado (solo visual, no otorga permisos reales)'"
+        >
+          @for (r of allRoles; track r) {
+            <mat-option [value]="r">{{ r }}</mat-option>
+          }
+        </mat-select>
+      </span>
       <button mat-button (click)="logout()">Cerrar sesion</button>
     </mat-toolbar>
     <main class="shell__content">

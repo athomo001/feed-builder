@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from hub.destinations_store import AdapterType, RetryPolicy
 from hub.policy_store import AllowedIOC
+from hub.api.token_store import Role as TokenRole
 
 
 class _Forbid(BaseModel):
@@ -98,3 +99,20 @@ class SecretCreate(_Forbid):
 
 class RotateKeyRequest(_Forbid):
     new_key: str
+
+
+class TokenCreate(_Forbid):
+    role: TokenRole
+    # Dias hasta expirar, no una fecha ISO cruda: mas simple de armar desde
+    # un formulario. None = sin expiracion (mismo default que create_token).
+    expires_in_days: Optional[int] = None
+
+
+class OpenCTISettingsUpdate(_Forbid):
+    url: str
+    tls_verify: bool = True
+    ca_cert_path: Optional[str] = None
+    stream_id: Optional[str] = None
+    # Write-only: si se omite, se conserva el token ya guardado (permite
+    # editar URL/TLS sin tener que volver a pegar el token cada vez).
+    token: Optional[str] = None

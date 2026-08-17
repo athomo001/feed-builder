@@ -34,14 +34,13 @@ Ver secciones 13 en adelante para la arquitectura real y vigente del Hub (`hub/`
 ## 4.1 Infraestructura y sistema
 
 - Docker Engine + Docker Compose.
-- Una instancia de OpenCTI ya desplegada y accesible (por `OPENCTI_URL`), con un token de cuenta de servicio no administrativa.
 - Por defecto todo se resuelve relativo a este repo, sin tocar nada: el código (`hub/`) desde `.`, el build de `ng build` desde `./ui/dist/ui/browser`, `nginx.conf` desde `./nginx.conf` y los certificados TLS desde `./certs/`. Solo hace falta declarar `HUB_APP_PATH`/`UI_DIST_PATH`/`NGINX_CONF_PATH`/`NGINX_CERTS_PATH` en `.env` si tu despliegue guarda alguna de esas carpetas en otro lugar (ver `.env.example`).
-- Si el Hub está co-ubicado con OpenCTI en el mismo host: acceso a la red Docker externa de OpenCTI (`OPENCTI_DOCKER_NETWORK`). Si es remoto: solo necesita alcanzar `OPENCTI_URL` por HTTPS.
+- El Hub arranca standalone: no necesita conocer OpenCTI para levantar el stack (`docker compose up -d` no requiere ninguna variable `OPENCTI_*`, ni compartir red Docker con OpenCTI). La conexión se configura después, en caliente, desde la Admin UI — ver sección 4.2 y el paso 6 de la sección 5.
 
 ## 4.2 Requisitos de OpenCTI
 
-- OpenCTI arriba y saludable, gestionado por fuera de este repositorio.
-- Token de cuenta de servicio (no administrativa) con permisos de stream y GraphQL — ver sección 13.2.
+- OpenCTI arriba y saludable, gestionado por fuera de este repositorio, alcanzable por HTTPS desde donde corre `hub-service`/`hub-api` (no hace falta estar en la misma red Docker: es una llamada saliente normal).
+- Token de cuenta de servicio (no administrativa) con permisos de stream y GraphQL — ver sección 13.2. Se carga desde la Admin UI (pantalla "Conexión OpenCTI") o vía `PUT /admin/api/v1/opencti-settings`, no desde `.env`.
 
 ## 4.3 Requisitos de Nginx
 
@@ -53,16 +52,21 @@ Ver secciones 13 en adelante para la arquitectura real y vigente del Hub (`hub/`
 
 ## 5) Puesta en marcha
 
-1. Confirmar que OpenCTI ya está arriba y accesible desde donde se va a correr este compose.
-2. Copiar `.env.example` a `.env` y completar valores reales (`OPENCTI_URL`, `OPENCTI_SERVICE_ACCOUNT_TOKEN`, rutas de host, `PUBLIC_HOST`).
-3. Verificar que las rutas de host usadas en volúmenes existan y tengan permisos.
+1. Copiar `.env.example` a `.env` y completar `PUBLIC_HOST` (y `NGINX_HTTPS_PORT` si el default 8446 no está libre). No hace falta nada de OpenCTI todavía — el Hub arranca standalone.
+2. Verificar que las rutas de host usadas en volúmenes existan y tengan permisos (o dejar los defaults relativos al repo, ver sección 4.1).
+3. Crear la red `hub-net` **una sola vez** (queda declarada como `external` en `docker-compose.yml` a propósito: crear una red Docker regenera las reglas de `iptables` del host, lo que en un host con muchas redes ya corriendo puede resetear brevemente conexiones TCP establecidas, como una sesión SSH -- dejarla pre-creada evita que ese evento se repita en cada `up`/`down`):
+
+```bash
+docker network create hub-net
+```
+
 4. Levantar el Hub:
 
 ```bash
 docker compose up -d
 ```
 
-5. Validar estado:
+5. Validar estado (los 3 contenedores deben quedar `Up`/`healthy` aunque OpenCTI todavía no esté configurado):
 
 ```bash
 docker compose ps
@@ -71,7 +75,17 @@ docker compose logs -f hub-api
 docker compose logs -f nginx
 ```
 
-6. Probar la Admin API y los feeds desde red interna:
+6. Generar el primer token de Admin API (sección 14.2) y, con él, configurar la conexión a OpenCTI vía la Admin UI (pantalla "Conexión OpenCTI") o directo por API (sección 14.3):
+
+```bash
+curl -s -X PUT https://$PUBLIC_HOST:$NGINX_HTTPS_PORT/admin/api/v1/opencti-settings -k \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"url": "https://opencti.example.local:8443", "token": "<token-de-cuenta-de-servicio>"}'
+```
+
+Recién en este punto `hub-service` deja de esperar y arranca el backfill + Live Stream.
+
+7. Probar la Admin API y los feeds desde red interna:
 
 ```bash
 curl -k https://$PUBLIC_HOST:$NGINX_HTTPS_PORT/healthz/liveness
@@ -255,21 +269,24 @@ docker compose restart nginx
 
 ## 10.2 Problemas comunes
 
-1. 401 en el stream de OpenCTI:
-   - `OPENCTI_SERVICE_ACCOUNT_TOKEN` inválido, revocado o sin permisos de stream/GraphQL.
+1. `hub-service` arriba pero nunca hace backfill/conecta al stream:
+   - OpenCTI todavía no fue configurado desde la Admin UI/API: `GET /admin/api/v1/opencti-settings` devuelve `has_token: false` o `url: null` (ver sección 5 paso 6). Es el estado esperado en un Hub recién levantado, no un error.
 
-2. Feeds vacíos:
+2. 401 en el stream de OpenCTI:
+   - El token guardado en "Conexión OpenCTI" es inválido, fue revocado, o no tiene permisos de stream/GraphQL. Probar con `POST /admin/api/v1/opencti-settings/test`.
+
+3. Feeds vacíos:
    - No hay eventos que cumplan la política publicada del destino (ver sección 14).
    - No hay ninguna política publicada para ese destino (spec/08: sin política publicada, el destino no recibe entregas).
 
-3. Nginx responde 404 en `/feeds/*`:
+4. Nginx responde 404 en `/feeds/*`:
    - Volumen `hub_feeds` mal montado, o el destino/subtipo pedido todavía no generó ningún archivo.
 
-4. Problemas TLS:
+5. Problemas TLS:
    - Certificado/llave no encontrados o no coinciden con `server_name`/`PUBLIC_HOST`.
 
-5. Reconexiones frecuentes del stream:
-   - Inestabilidad de red hacia OpenCTI, o `OPENCTI_URL` apuntando a un host/puerto incorrecto.
+6. Reconexiones frecuentes del stream:
+   - Inestabilidad de red hacia OpenCTI, o la URL guardada en "Conexión OpenCTI" apuntando a un host/puerto incorrecto (`POST /admin/api/v1/opencti-settings/test` para confirmar).
    - `hub-service` reconecta solo con backoff (ver `docs/RUNBOOK.md` sección 2); revisar `GET /admin/api/v1/ingestion/status`.
 
 ## 11) Seguridad y buenas practicas
@@ -298,15 +315,10 @@ pip install -r requirements-dev.txt
 
 ### 13.2 Variables de entorno del Hub
 
-Archivo de configuracion propio, separado del `.env` de OpenCTI (spec/02 "Configuracion minima de conexion"; ninguna variable compartida del stack de OpenCTI se lee desde aqui):
+Archivo de configuracion propio, separado del `.env` de OpenCTI (spec/02 "Configuracion minima de conexion"; ninguna variable compartida del stack de OpenCTI se lee desde aqui). La conexion a OpenCTI en si (URL, token, TLS, stream_id) **no** es una variable de entorno: se configura en caliente desde la Admin UI/API (`hub/opencti_settings_store.py`, seccion 14.3) para que el Hub arranque standalone y esa config se pueda cambiar sin redeploy:
 
 | Variable | Obligatoria | Default | Para que sirve |
 | --- | --- | --- | --- |
-| `OPENCTI_URL` | Si | — | Base URL de OpenCTI |
-| `OPENCTI_SERVICE_ACCOUNT_TOKEN` | Si | — | Token del service account dedicado del Hub (nunca `OPENCTI_ADMIN_TOKEN`) |
-| `OPENCTI_STREAM_ID` | No | stream general | Live Stream especifico a consumir |
-| `OPENCTI_TLS_VERIFY` | No | `true` | `false` solo en desarrollo local |
-| `OPENCTI_CA_CERT_PATH` | No | — | CA interna/autofirmada |
 | `POLICY_TTL_DAYS` | No | `30` | TTL por defecto usado en `effective_expiration` |
 | `BACKFILL_WINDOW_DAYS` / `BACKFILL_MAX_PAGES` / `BACKFILL_PAGE_SIZE` | No | `7` / `10` / `100` | Alcance del backfill inicial y de cada reconciliacion |
 | `RECONCILE_INTERVAL_SECONDS` | No | `600` | Cadencia de reconciliacion GraphQL periodica |
@@ -334,7 +346,7 @@ La suite de `tests/hub/` cubre los contratos de Entrega 0, el nucleo de Entrega 
 
 ### 13.5 Backup y restore
 
-El estado durable vive en `HUB_STATE_DIR` (`cursor.sqlite3`, `ledger.sqlite3`, `destinations.sqlite3`, `policies.sqlite3`, `tokens.sqlite3`, `idempotency.sqlite3`, `audit.sqlite3`, `ingestion_control.sqlite3`, `.heartbeat`) y los feeds materializados en `TXT_FEED_DIR`. Para respaldar, copiar ambos directorios con el proceso detenido o usando `sqlite3 .backup` sobre los `.sqlite3`; para restaurar, reponer los archivos antes de arrancar `hub.service`/`hub.api` (el estado se recarga solo al iniciar).
+El estado durable vive en `HUB_STATE_DIR` (`cursor.sqlite3`, `ledger.sqlite3`, `destinations.sqlite3`, `policies.sqlite3`, `tokens.sqlite3`, `idempotency.sqlite3`, `audit.sqlite3`, `ingestion_control.sqlite3`, `opencti_settings.sqlite3`, `secrets.sqlite3`, `.heartbeat`) y los feeds materializados en `TXT_FEED_DIR`. Para respaldar, copiar ambos directorios con el proceso detenido o usando `sqlite3 .backup` sobre los `.sqlite3`; para restaurar, reponer los archivos antes de arrancar `hub.service`/`hub.api` (el estado se recarga solo al iniciar).
 
 ## 14) Admin API - rediseno (Entrega 2)
 
@@ -364,10 +376,19 @@ print(plaintext)  # guardarlo ahora: no se puede volver a mostrar
 
 Roles (spec/08, jerarquicos: uno mayor cubre las acciones de uno menor): `viewer` < `operator` < `policy-admin` < `security-admin`.
 
-### 14.3 Ejemplo: alta de un destino TXT + politica + publicacion
+### 14.3 Ejemplo: configurar OpenCTI + alta de un destino TXT + politica + publicacion
 
 ```bash
 TOKEN=... # token con rol security-admin/policy-admin segun el paso
+
+# Configurar la conexion a OpenCTI (una vez; se puede repetir para rotar
+# el token o cambiar la URL sin reiniciar el proceso, ver hub/opencti_settings_store.py).
+curl -s -X PUT http://localhost:8000/admin/api/v1/opencti-settings \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"url": "https://opencti.example.local:8443", "token": "<token-de-cuenta-de-servicio>"}'
+
+# Probar la conexion antes de esperar a que hub-service la levante sola.
+curl -s -X POST http://localhost:8000/admin/api/v1/opencti-settings/test -H "Authorization: Bearer $TOKEN"
 
 curl -s -X POST http://localhost:8000/admin/api/v1/destinations \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -452,11 +473,11 @@ npx playwright install chromium # una sola vez
 npx playwright test             # E2E: levanta backend Python + ng serve automaticamente
 ```
 
-El E2E (`ui/e2e/`) siembra un token `security-admin` y una entrega en dead-letter en un `state_dir` temporal que se limpia al inicio de cada corrida (para que sea reproducible), y no depende de una instancia OpenCTI real (`OPENCTI_URL`/`OPENCTI_SERVICE_ACCOUNT_TOKEN` ficticios, suficientes para levantar el proceso). Cubre: login (redirect sin sesion, token valido, token invalido), descartar una entrega de DLQ con motivo obligatorio, y el flujo completo de politicas (crear borrador -> simular con el error esperado sin OpenCTI real -> publicar con motivo).
+El E2E (`ui/e2e/`) siembra un token `security-admin` y una entrega en dead-letter en un `state_dir` temporal que se limpia al inicio de cada corrida (para que sea reproducible), y no depende de una instancia OpenCTI real (el Hub arranca standalone, sin conexion a OpenCTI configurada). Cubre: login (redirect sin sesion, token valido, token invalido), descartar una entrega de DLQ con motivo obligatorio, y el flujo completo de politicas (crear borrador -> simular con el error esperado sin OpenCTI real -> publicar con motivo).
 
 ### 15.4 Secciones de navegacion
 
-Las 7 de spec/07: Overview, Observabilidad & Logs, Operaciones & DLQ, Politicas, Destinos, OpenCTI/Ingesta, Auditoria & Configuracion. RBAC client-side (misma jerarquia que la seccion 14.2) oculta botones de acciones que igual fallarian con 403 en el servidor -- la autorizacion real siempre la aplica el Admin API.
+Las 7 de spec/07 (Overview, Observabilidad & Logs, Operaciones & DLQ, Politicas, Destinos, OpenCTI/Ingesta, Auditoria & Configuracion) mas **Conexion OpenCTI**, agregada por el pivot "standalone" (seccion 13.2/14.3) para configurar URL/token/TLS/stream_id en caliente. RBAC client-side (misma jerarquia que la seccion 14.2) oculta botones de acciones que igual fallarian con 403 en el servidor -- la autorizacion real siempre la aplica el Admin API.
 
 ### 15.5 Limites conocidos
 

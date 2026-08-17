@@ -1,5 +1,7 @@
 export * from './alerts.service';
 export * from './destinations.service';
+export * from './opencti-settings.service';
+export * from './tokens.service';
 export * from './policies.service';
 export * from './deliveries.service';
 export * from './feeds.service';

@@ -28,9 +28,10 @@ from hub.backfill import run_backfill
 from hub.config import HubConfig, load_config
 from hub.cursor_store import init_db as init_cursor_db, load_cursor, save_cursor
 from hub.destinations_store import init_db as init_destinations_db, list_destinations
-from hub.graphql_client import GraphQLClient
+from hub.graphql_client import GraphQLClient, PING_QUERY
 from hub.ingestion_control import get_control, init_db as init_ingestion_control_db, clear_reconcile_request, clear_rewind_request
 from hub.ledger import init_db as init_ledger_db, list_seen_stix_ids
+from hub.opencti_settings_store import OpenCTIConnection, init_db as init_opencti_settings_db, resolve_opencti_connection
 from hub.pipeline import DedupState, process_envelope
 from hub.policy_store import init_db as init_policies_db
 from hub.reconcile import run_reconciliation
@@ -45,10 +46,6 @@ from hub.tracing import configure_tracing, span
 # Stream (que puede tardar mucho entre eventos si OpenCTI esta callado), asi
 # que se chequea por tiempo transcurrido, no por evento procesado.
 _ALERT_EVAL_INTERVAL_SECONDS = 60
-
-# Query minima y barata: solo sirve para confirmar que la URL, el TLS y el
-# token son validos antes de arrancar backfill/stream, sin traer datos reales.
-_PING_QUERY = "query HubPing { indicators(first: 1) { pageInfo { hasNextPage } } }"
 
 
 def _log(msg: str) -> None:
@@ -115,16 +112,16 @@ def is_healthy(path: str, max_age_seconds: int = 600) -> bool:
 # --- Conexion ---------------------------------------------------------------
 
 
-def stream_url(config: HubConfig) -> str:
-    if config.opencti_stream_id:
-        return f"{config.opencti_url}/stream/{config.opencti_stream_id}"
-    return f"{config.opencti_url}/stream"
+def stream_url(connection: OpenCTIConnection) -> str:
+    if connection.stream_id:
+        return f"{connection.url}/stream/{connection.stream_id}"
+    return f"{connection.url}/stream"
 
 
 def validate_connection(client: GraphQLClient) -> None:
-    """Primer paso del flujo de entrada: falla rapido (URL/TLS/token
-    invalidos) antes de invertir tiempo en backfill o abrir el Live Stream."""
-    client.query(_PING_QUERY)
+    """Falla rapido (URL/TLS/token invalidos) antes de invertir tiempo en
+    backfill o abrir el Live Stream."""
+    client.query(PING_QUERY)
 
 
 class HubRuntime:
@@ -135,7 +132,6 @@ class HubRuntime:
     # de estado por separado en cada fase.
     def __init__(self, config: HubConfig):
         self.config = config
-        self.client = GraphQLClient(config.opencti_url, config.opencti_token, verify=config.verify)
         os.makedirs(config.state_dir, exist_ok=True)
         self.cursor_conn = init_cursor_db(os.path.join(config.state_dir, "cursor.sqlite3"))
         self.ledger_conn = init_ledger_db(os.path.join(config.state_dir, "ledger.sqlite3"))
@@ -145,6 +141,7 @@ class HubRuntime:
         self.taxii_conn = init_taxii_db(os.path.join(config.state_dir, "taxii.sqlite3"))
         self.alerts_conn = init_alerts_db(os.path.join(config.state_dir, "alerts.sqlite3"))
         self.secrets_conn = init_secrets_db(os.path.join(config.state_dir, "secrets.sqlite3"))
+        self.opencti_settings_conn = init_opencti_settings_db(os.path.join(config.state_dir, "opencti_settings.sqlite3"))
         self.secret_cipher = load_cipher(config)
         self.dedup_state = DedupState()
         # Reconstruido desde el ledger al arrancar (no es efimero como
@@ -154,6 +151,17 @@ class HubRuntime:
         # Estado del circuit breaker vive en el proceso, por destino, y
         # persiste entre llamadas a process() (ver hub/retry.py).
         self.circuit_breakers: dict = {}
+
+    def get_connection(self) -> Optional[OpenCTIConnection]:
+        # Se resuelve fresco cada vez que se llama (no se cachea en
+        # self.client como antes) para que un cambio de URL/token/TLS hecho
+        # desde el Admin API se recoja sin reiniciar el proceso -- mismo
+        # motivo por el que `process()` reconstruye `adapters` en cada
+        # llamada en vez de cachearlos una sola vez al arrancar.
+        return resolve_opencti_connection(
+            self.opencti_settings_conn, self.config.source_id,
+            secrets_conn=self.secrets_conn, cipher=self.secret_cipher,
+        )
 
     def _build_adapters(self, destinations) -> dict:
         # Se reconstruye a partir de la lista de destinos vigente en vez de
@@ -237,7 +245,7 @@ class HubRuntime:
 # --- Backfill ----------------------------------------------------------------
 
 
-def run_backfill_phase(runtime: HubRuntime):
+def run_backfill_phase(runtime: HubRuntime, connection: OpenCTIConnection):
     # Ventana acotada (backfill_window_days), no historico completo: al
     # arrancar el Hub por primera vez o tras una pausa larga, traer todo el
     # historial de OpenCTI podria ser enorme y lento; el resto de eventos
@@ -245,7 +253,7 @@ def run_backfill_phase(runtime: HubRuntime):
     config = runtime.config
     since = datetime.now(timezone.utc) - timedelta(days=config.backfill_window_days)
     result = run_backfill(
-        runtime.client,
+        connection.client,
         since=since,
         max_pages=config.backfill_max_pages,
         page_size=config.backfill_page_size,
@@ -262,7 +270,7 @@ def run_backfill_phase(runtime: HubRuntime):
 # --- Reconciliacion ------------------------------------------------------
 
 
-def run_reconciliation_phase(runtime: HubRuntime):
+def run_reconciliation_phase(runtime: HubRuntime, connection: OpenCTIConnection):
     # Corre periodicamente ademas del Live Stream porque el stream puede
     # perder eventos durante una desconexion/reconexion; comparando contra
     # seen_stix_ids se detectan y recuperan esos huecos sin depender de que
@@ -270,7 +278,7 @@ def run_reconciliation_phase(runtime: HubRuntime):
     config = runtime.config
     since = datetime.now(timezone.utc) - timedelta(days=config.backfill_window_days)
     report = run_reconciliation(
-        runtime.client,
+        connection.client,
         since=since,
         seen_stix_ids=runtime.seen_stix_ids,
         on_envelope=runtime.process,
@@ -294,10 +302,6 @@ _PAUSE_POLL_INTERVAL_SECONDS = 5
 def listen_live_stream(runtime: HubRuntime, *, session=None):
     config = runtime.config
     session = session or requests
-    headers = {
-        "Authorization": f"Bearer {config.opencti_token}",
-        "Accept": "text/event-stream",
-    }
 
     # Retomar desde el ultimo cursor persistido (Last-Event-ID) en vez de
     # desde el principio del stream: evita reprocesar todo el historial cada
@@ -312,7 +316,10 @@ def listen_live_stream(runtime: HubRuntime, *, session=None):
 
     # Loop de reconexion: una conexion SSE eventualmente se cae (red,
     # despliegue de OpenCTI, rotacion de balanceador) y hay que volver a
-    # conectar donde se quedo, no terminar el proceso.
+    # conectar donde se quedo, no terminar el proceso. Este mismo loop
+    # tambien espera, con el mismo patron heartbeat+sondeo que la pausa, si
+    # la conexion a OpenCTI se desconfigura (o todavia no se configuro,
+    # ver `run()`) -- el Hub se queda sano esperando, no crashea.
     while not shutdown_requested():
         # Pausar/reanudar y rebobinar cursor se piden desde el Admin API
         # (proceso separado) via hub/ingestion_control.py; este loop es
@@ -326,20 +333,29 @@ def listen_live_stream(runtime: HubRuntime, *, session=None):
             time.sleep(_PAUSE_POLL_INTERVAL_SECONDS)
             continue
 
+        connection = runtime.get_connection()
+        if connection is None:
+            write_heartbeat(heartbeat_path)  # el proceso sigue vivo, solo esperando config
+            time.sleep(_PAUSE_POLL_INTERVAL_SECONDS)
+            continue
+
         if control.rewind_to_cursor is not None:
             _log(f"Rewind solicitado: cursor -> {control.rewind_to_cursor!r} (motivo: {control.rewind_reason})")
             last_event_id = control.rewind_to_cursor
             save_cursor(runtime.cursor_conn, config.source_id, last_event_id)
             clear_rewind_request(runtime.ingestion_control_conn, config.source_id)
 
-        request_headers = dict(headers)
+        request_headers = {
+            "Authorization": f"Bearer {connection.token}",
+            "Accept": "text/event-stream",
+        }
         if last_event_id:
             request_headers["Last-Event-ID"] = last_event_id
 
-        url = stream_url(config)
+        url = stream_url(connection)
         _log(f"Connecting SSE: {url}")
         try:
-            with session.get(url, headers=request_headers, stream=True, timeout=60, verify=config.verify) as r:
+            with session.get(url, headers=request_headers, stream=True, timeout=60, verify=connection.verify) as r:
                 if r.status_code == 401:
                     raise RuntimeError("401 Unauthorized (token invalido?)")
                 r.raise_for_status()
@@ -373,7 +389,7 @@ def listen_live_stream(runtime: HubRuntime, *, session=None):
                     now_ts = time.time()
                     control = get_control(runtime.ingestion_control_conn, config.source_id)
                     if now_ts >= next_reconcile_ts or control.reconcile_requested:
-                        run_reconciliation_phase(runtime)
+                        run_reconciliation_phase(runtime, connection)
                         next_reconcile_ts = now_ts + config.reconcile_interval_seconds
                         if control.reconcile_requested:
                             clear_reconcile_request(runtime.ingestion_control_conn, config.source_id)
@@ -412,13 +428,37 @@ def run(config: HubConfig) -> None:
 
     configure_tracing(config)
     runtime = HubRuntime(config)
-    write_heartbeat(_heartbeat_path(config))
+    heartbeat_path = _heartbeat_path(config)
+    write_heartbeat(heartbeat_path)
 
-    _log("Validating OpenCTI connection")
-    validate_connection(runtime.client)
+    # Espera (mismo patron heartbeat+sondeo que la pausa, ver
+    # _PAUSE_POLL_INTERVAL_SECONDS) a que un operador configure OpenCTI
+    # desde el Admin API/UI y a que la conexion valide -- el Hub arranca y
+    # queda sano sin esa config presente, en vez de crashear como antes.
+    # Backfill inicial corre una sola vez, aca, antes de entrar al loop de
+    # Live Stream (que se encarga de reconectar/reintentar de ahi en mas).
+    backoff = 2
+    connection = None
+    while not shutdown_requested() and connection is None:
+        candidate = runtime.get_connection()
+        if candidate is None:
+            write_heartbeat(heartbeat_path)
+            time.sleep(_PAUSE_POLL_INTERVAL_SECONDS)
+            continue
+        try:
+            _log("Validating OpenCTI connection")
+            validate_connection(candidate.client)
+        except Exception as e:
+            _log(f"No se pudo validar la conexion a OpenCTI: {e} (reintento en {backoff}s)")
+            write_heartbeat(heartbeat_path)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+            continue
+        connection = candidate
 
-    run_backfill_phase(runtime)
-    listen_live_stream(runtime)
+    if connection is not None:
+        run_backfill_phase(runtime, connection)
+        listen_live_stream(runtime)
 
     _log("Shutdown complete")
 

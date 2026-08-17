@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Request
 from hub.adapters.factory import build_adapter, uses_circuit_breaker
 from hub.api.audit import write_audit
 from hub.api.auth import require_role
-from hub.api.deps import APIState, get_state
+from hub.api.deps import APIState, get_graphql_client, get_state
 from hub.api.errors import APIError
 from hub.api.schemas import DiscardRequest
 from hub.delivery import DeliveryState
@@ -54,7 +54,13 @@ def dead_letters(state: APIState = Depends(get_state), _token=Depends(require_ro
 
 
 @router.post("/{delivery_id}/retry")
-def retry(delivery_id: str, request: Request, state: APIState = Depends(get_state), token=Depends(require_role("operator"))):
+def retry(
+    delivery_id: str,
+    request: Request,
+    state: APIState = Depends(get_state),
+    graphql_client=Depends(get_graphql_client),
+    token=Depends(require_role("operator")),
+):
     event_id, destination_id, policy_version = _parse_delivery_id(delivery_id)
     entry = get_delivery(state.ledger_conn, event_id, destination_id, policy_version)
     if entry is None:
@@ -72,11 +78,14 @@ def retry(delivery_id: str, request: Request, state: APIState = Depends(get_stat
     if destination is None:
         raise APIError(404, "Not Found", f"destination '{destination_id}' ya no existe", error_code="destination_not_found")
 
+    if graphql_client is None:
+        raise APIError(409, "Conflict", "OpenCTI no esta configurado todavia", error_code="opencti_not_configured")
+
     # El ledger solo guarda el stix_id, no el contenido del indicador: hay
     # que volver a consultarlo a OpenCTI para reconstruir el evento a
     # entregar, ya que pudo cambiar desde el intento original.
     try:
-        data = state.graphql_client.query(GET_INDICATOR_QUERY, {"id": entry.stix_id})
+        data = graphql_client.query(GET_INDICATOR_QUERY, {"id": entry.stix_id})
     except Exception as e:
         raise APIError(502, "Bad Gateway", f"no se pudo consultar OpenCTI: {e}", error_code="opencti_unavailable")
 

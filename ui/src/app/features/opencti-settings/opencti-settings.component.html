@@ -1,0 +1,73 @@
+<h1>Conexion OpenCTI</h1>
+
+<mat-card>
+  <mat-card-content>
+    @if (!loaded()) {
+      <p>Cargando...</p>
+    } @else {
+      @if (!hasToken()) {
+        <p class="not-configured">
+          OpenCTI todavia no esta configurado: el Hub esta arriba y sano, esperando esta configuracion antes de
+          arrancar el backfill y el Live Stream.
+        </p>
+      }
+
+      <mat-form-field appearance="outline" style="width: 100%">
+        <mat-label>URL de OpenCTI</mat-label>
+        <input
+          matInput
+          placeholder="https://opencti.example.local:8443"
+          [ngModel]="url()"
+          (ngModelChange)="url.set($event)"
+          [disabled]="!canManage()"
+        />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline" style="width: 100%">
+        <mat-label>Token de cuenta de servicio {{ hasToken() ? '(dejar vacio para conservar el actual)' : '' }}</mat-label>
+        <input
+          matInput
+          type="password"
+          autocomplete="new-password"
+          [ngModel]="token()"
+          (ngModelChange)="token.set($event)"
+          [disabled]="!canManage()"
+        />
+      </mat-form-field>
+
+      <mat-checkbox [ngModel]="tlsVerify()" (ngModelChange)="tlsVerify.set($event)" [disabled]="!canManage()">
+        Verificar certificado TLS
+      </mat-checkbox>
+      @if (!tlsVerify()) {
+        <p class="hint">
+          Desactivado: valido para certificados autofirmados en despliegues internos, pero deja de validar que el
+          servidor sea realmente OpenCTI.
+        </p>
+      }
+
+      <mat-form-field appearance="outline" style="width: 100%">
+        <mat-label>Stream ID (opcional)</mat-label>
+        <input matInput [ngModel]="streamId()" (ngModelChange)="streamId.set($event)" [disabled]="!canManage()" />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline" style="width: 100%">
+        <mat-label>Ruta de CA/certificado interno (opcional, dentro del contenedor)</mat-label>
+        <input matInput [ngModel]="caCertPath()" (ngModelChange)="caCertPath.set($event)" [disabled]="!canManage()" />
+      </mat-form-field>
+
+      @if (testResult(); as result) {
+        <p [class.test-ok]="result.ok" [class.test-error]="!result.ok">
+          {{ result.ok ? 'Conexion exitosa.' : 'Error: ' + result.error }}
+        </p>
+      }
+    }
+  </mat-card-content>
+  @if (canManage()) {
+    <mat-card-actions>
+      <button mat-flat-button color="primary" (click)="save()">Guardar</button>
+      <button mat-button (click)="test()" [disabled]="testing()">
+        {{ testing() ? 'Probando...' : 'Probar conexion' }}
+      </button>
+    </mat-card-actions>
+  }
+</mat-card>

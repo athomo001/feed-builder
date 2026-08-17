@@ -19,6 +19,13 @@ class GraphQLError(RuntimeError):
     pass
 
 
+# Query minima y barata: solo sirve para confirmar que la URL, el TLS y el
+# token son validos, sin traer datos reales. Compartida entre hub.service
+# (validar antes de arrancar backfill/stream) y el router
+# opencti_settings.test (botón "probar conexion" de la UI).
+PING_QUERY = "query HubPing { indicators(first: 1) { pageInfo { hasNextPage } } }"
+
+
 class GraphQLClient:
     def __init__(self, url: str, token: str, *, verify=True, timeout_seconds: int = 120):
         self._graphql_url = url.rstrip("/") + "/graphql"

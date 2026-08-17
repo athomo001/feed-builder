@@ -32,6 +32,14 @@
   text-transform: capitalize;
   font-size: 0.85rem;
   opacity: 0.8;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.shell__role-select {
+  width: 8.5rem;
+  text-transform: capitalize;
 }
 
 .shell__content {

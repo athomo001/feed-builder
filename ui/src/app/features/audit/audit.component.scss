@@ -15,3 +15,10 @@
   opacity: 0.7;
   font-style: italic;
 }
+
+.token-plaintext {
+  background: var(--mat-sys-secondary-container, #fff3cd);
+  padding: 0.75rem 1rem;
+  border-radius: 4px;
+  word-break: break-all;
+}

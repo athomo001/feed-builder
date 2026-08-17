@@ -6,9 +6,6 @@
 # mantener sincronizado con el (mismas variables/defaults) cuando cambien
 # variables, volumenes o command de hub-service/hub-api.
 x-hub-common-env: &hub-common-env
-  OPENCTI_URL: ${OPENCTI_URL}
-  OPENCTI_SERVICE_ACCOUNT_TOKEN: ${OPENCTI_SERVICE_ACCOUNT_TOKEN}
-  OPENCTI_TLS_VERIFY: ${OPENCTI_TLS_VERIFY:-true}
   HUB_STATE_DIR: /state
   TXT_FEED_DIR: /feeds
   ALERT_SMTP_HOST: ${ALERT_SMTP_HOST:-}
@@ -27,7 +24,6 @@ services:
     restart: always
     environment:
       <<: *hub-common-env
-      OPENCTI_STREAM_ID: ${OPENCTI_STREAM_ID:-}
       HUB_SOURCE_ID: ${HUB_SOURCE_ID:-opencti-main}
       RECONCILE_INTERVAL_SECONDS: ${RECONCILE_INTERVAL_SECONDS:-600}
       ALERT_COOLDOWN_SECONDS: ${ALERT_COOLDOWN_SECONDS:-300}
@@ -50,7 +46,6 @@ services:
       start_period: 60s
     networks:
       - hub-net
-      - opencti-net
 
   hub-api:
     image: python:3.12-slim
@@ -95,11 +90,8 @@ volumes:
   hub_feeds:
 
 networks:
+  # Pre-creada a mano (`docker network create hub-net`) -- ver la misma
+  # nota en docker-compose.yml sobre por que no se deja que Compose la
+  # cree/borre en cada up/down.
   hub-net:
-    driver: bridge
-  # Solo necesaria si el Hub esta co-ubicado en el mismo host que OpenCTI;
-  # si es remoto sobre HTTPS, borrar esta red de "networks:" en ambos
-  # servicios y de esta seccion.
-  opencti-net:
     external: true
-    name: ${OPENCTI_DOCKER_NETWORK:-opencti-net}

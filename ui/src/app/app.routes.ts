@@ -49,6 +49,11 @@ export const routes: Routes = [
         loadComponent: () => import('./features/ingestion/ingestion.component').then((m) => m.IngestionComponent),
       },
       {
+        path: 'opencti-settings',
+        loadComponent: () =>
+          import('./features/opencti-settings/opencti-settings.component').then((m) => m.OpenCTISettingsComponent),
+      },
+      {
         path: 'audit',
         loadComponent: () => import('./features/audit/audit.component').then((m) => m.AuditComponent),
       },

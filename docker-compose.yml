@@ -1,24 +1,21 @@
 ########################################################################
 # HUB (esta integracion)
 ########################################################################
-# Este compose levanta SOLO el Hub de distribucion de IOC (el paquete
-# hub/, reemplazo del script legado opencti_feed_builder.py). OpenCTI ya
-# esta desplegado por su cuenta -- este proyecto es una integracion sobre
-# el, no un despliegue de OpenCTI en si. Si OpenCTI corre en un Docker
-# host distinto, alcanza con configurar OPENCTI_URL/PUBLIC_HOST en .env y
-# borrar el bloque "external network" de abajo. Si corre co-ubicado en el
-# mismo host, unirse a la red externa de OpenCTI (OPENCTI_DOCKER_NETWORK)
-# deja resolver su nombre de servicio directo.
+# Este compose levanta el Hub de distribucion de IOC (el paquete hub/,
+# reemplazo del script legado opencti_feed_builder.py) de forma
+# STANDALONE: no necesita saber nada de OpenCTI para arrancar. La conexion
+# (URL, token, TLS, stream_id) se configura despues, en caliente, desde la
+# Admin UI (pantalla "Conexion OpenCTI") -- ver hub/opencti_settings_store.py.
+# Como la conexion es una llamada HTTPS saliente normal (no una
+# dependencia de red Docker compartida con OpenCTI), no hace falta unirse
+# a ninguna red externa ni conocer el nombre de la red Docker de OpenCTI.
 #
 # Variables de entorno compartidas entre hub-service y hub-api (no llevan
 # "x-" un significado especial para Compose -- es la convencion para
 # bloques reusables via el merge key YAML "<<", asi no se repite cada
 # variable en los dos servicios). Cada servicio solo agrega abajo lo que
-# le es propio (puerto, stream, OIDC, etc.).
+# le es propio (puerto, OIDC, etc.).
 x-hub-common-env: &hub-common-env
-  OPENCTI_URL: ${OPENCTI_URL}
-  OPENCTI_SERVICE_ACCOUNT_TOKEN: ${OPENCTI_SERVICE_ACCOUNT_TOKEN}
-  OPENCTI_TLS_VERIFY: ${OPENCTI_TLS_VERIFY:-true}
   HUB_STATE_DIR: /state
   TXT_FEED_DIR: /feeds
   ALERT_SMTP_HOST: ${ALERT_SMTP_HOST:-}
@@ -38,7 +35,6 @@ services:
     restart: always
     environment:
       <<: *hub-common-env
-      OPENCTI_STREAM_ID: ${OPENCTI_STREAM_ID:-}
       HUB_SOURCE_ID: ${HUB_SOURCE_ID:-opencti-main}
       RECONCILE_INTERVAL_SECONDS: ${RECONCILE_INTERVAL_SECONDS:-600}
       ALERT_COOLDOWN_SECONDS: ${ALERT_COOLDOWN_SECONDS:-300}
@@ -61,7 +57,6 @@ services:
       start_period: 60s
     networks:
       - hub-net
-      - opencti-net
     mem_limit: ${HUB_SERVICE_MEM_LIMIT:-512m}
     cpus: ${HUB_SERVICE_CPU_LIMIT:-1.0}
 
@@ -149,12 +144,12 @@ volumes:
   hub_feeds:
 
 networks:
+  # Pre-creada a mano UNA sola vez (`docker network create hub-net`, ver
+  # README.md #5) en vez de dejar que Compose la cree/borre en cada
+  # up/down: crear una red Docker regenera las reglas de iptables del host
+  # (cadenas DOCKER/FORWARD/NAT), lo que en hosts con muchas redes ya
+  # corriendo puede resetear brevemente conexiones TCP establecidas del
+  # host (ej. tu propia sesion SSH). Marcandola external, ese evento pasa
+  # una unica vez al crear la red a mano, no en cada `docker compose up`.
   hub-net:
-    driver: bridge
-  # Red de la instalacion de OpenCTI ya desplegada por separado (topologia
-  # "co-ubicado", spec/03-ARCHITECTURE.md). Si OpenCTI es remoto (otro
-  # Docker host, sobre HTTPS), borrar esta red del "networks:" de arriba en
-  # hub-service y esta seccion entera.
-  opencti-net:
     external: true
-    name: ${OPENCTI_DOCKER_NETWORK:-opencti-net}

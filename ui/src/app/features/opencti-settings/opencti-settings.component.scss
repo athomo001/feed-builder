@@ -1,0 +1,17 @@
+.not-configured {
+  opacity: 0.8;
+  font-style: italic;
+}
+
+.hint {
+  opacity: 0.7;
+  font-size: 0.85rem;
+}
+
+.test-ok {
+  color: var(--mat-sys-primary, green);
+}
+
+.test-error {
+  color: var(--mat-sys-error, #b00020);
+}

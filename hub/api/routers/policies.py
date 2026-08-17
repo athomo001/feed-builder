@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 
 from hub.api.audit import write_audit
 from hub.api.auth import require_role
-from hub.api.deps import APIState, get_state
+from hub.api.deps import APIState, get_graphql_client, get_state
 from hub.api.errors import APIError
 from hub.api.idempotency import with_idempotency
 from hub.api.schemas import PolicyCreate, SimulateRequest, VersionRequest
@@ -94,6 +94,7 @@ def simulate(
     policy_id: str,
     payload: SimulateRequest,
     state: APIState = Depends(get_state),
+    graphql_client=Depends(get_graphql_client),
     _token=Depends(require_role("policy-admin")),
 ):
     versions_list = list_versions(state.policies_conn, policy_id)
@@ -105,6 +106,12 @@ def simulate(
     candidate = versions_list[-1]
     active = get_active_version(state.policies_conn, policy_id)
 
+    if payload.sample is None and graphql_client is None:
+        raise APIError(
+            409, "Conflict", "OpenCTI no esta configurado todavia (o mandar 'sample' para simular sin el)",
+            error_code="opencti_not_configured",
+        )
+
     # Si el caller no manda una muestra propia, se consulta OpenCTI en vivo
     # para tener datos reales con los que simular; si manda `sample`, se usa
     # esa (por ejemplo en tests) y no hace falta el cliente GraphQL.
@@ -112,7 +119,7 @@ def simulate(
         candidate=candidate,
         active=active,
         sample_envelopes=payload.sample,
-        graphql_client=state.graphql_client if payload.sample is None else None,
+        graphql_client=graphql_client if payload.sample is None else None,
         sample_size=payload.sample_size,
     )
     return {"policy_id": policy_id, "candidate_version": candidate.version, **report}

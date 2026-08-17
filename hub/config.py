@@ -4,6 +4,12 @@ secretos de OpenCTI.
 Solo lee variables con prefijo propio del Hub; nunca las compartidas del
 .env de OpenCTI (MinIO, RabbitMQ, Neo4j, conectores, etc.).
 
+La conexion a OpenCTI (URL, token, TLS, stream_id) NO vive aca: se
+configura en caliente desde el Admin API/UI y se guarda en
+`hub/opencti_settings_store.py`, no en variables de entorno -- asi el Hub
+arranca y queda sano sin config de OpenCTI presente, y cambiarla no
+requiere redeploy. Ver `hub.opencti_settings_store.resolve_opencti_connection`.
+
 Autor: Athan Espinoza
 """
 import os
@@ -16,12 +22,6 @@ class HubConfig:
     # Un campo por variable de entorno relevante para el Hub (ver
     # load_config mas abajo); usar un dataclass en vez de un dict le da
     # tipado y autocompletado al resto del codigo.
-    opencti_url: str
-    opencti_token: str
-    opencti_stream_id: Optional[str] = None
-    tls_verify: bool = True
-    ca_cert_path: Optional[str] = None
-
     policy_ttl_days: int = 30
 
     backfill_max_pages: int = 10
@@ -100,13 +100,6 @@ class HubConfig:
         if self.oidc_role_mapping is None:
             self.oidc_role_mapping = {}
 
-    @property
-    def verify(self):
-        """Valor listo para requests(verify=...): CA cert path, bool o True."""
-        if not self.tls_verify:
-            return False
-        return self.ca_cert_path or True
-
 
 def load_config(env: Optional[dict] = None) -> HubConfig:
     # `env` es inyectable (en vez de leer siempre os.environ) para que los
@@ -116,13 +109,6 @@ def load_config(env: Optional[dict] = None) -> HubConfig:
 
     def get(name, default=None):
         return e.get(name, default)
-
-    url = get("OPENCTI_URL")
-    token = get("OPENCTI_SERVICE_ACCOUNT_TOKEN")
-    if not url:
-        raise RuntimeError("OPENCTI_URL is not set")
-    if not token:
-        raise RuntimeError("OPENCTI_SERVICE_ACCOUNT_TOKEN is not set")
 
     def env_bool(name, default):
         # Acepta las representaciones textuales mas comunes de "true" que
@@ -149,11 +135,6 @@ def load_config(env: Optional[dict] = None) -> HubConfig:
         return json.loads(value)
 
     return HubConfig(
-        opencti_url=url.rstrip("/"),
-        opencti_token=token,
-        opencti_stream_id=get("OPENCTI_STREAM_ID") or None,
-        tls_verify=env_bool("OPENCTI_TLS_VERIFY", True),
-        ca_cert_path=get("OPENCTI_CA_CERT_PATH") or None,
         policy_ttl_days=env_int("POLICY_TTL_DAYS", 30),
         backfill_max_pages=env_int("BACKFILL_MAX_PAGES", 10),
         backfill_page_size=env_int("BACKFILL_PAGE_SIZE", 100),

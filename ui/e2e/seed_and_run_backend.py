@@ -1,10 +1,11 @@
 """Levanta el Admin API para Playwright E2E, con estado pre-sembrado (un
 token security-admin y una entrega en dead-letter). Ver ui/e2e/global-setup.ts.
 
-No usa una instancia OpenCTI real (spec/PROJECT-MAP.md limite conocido):
-OPENCTI_URL/OPENCTI_SERVICE_ACCOUNT_TOKEN son valores ficticios, suficientes
-para arrancar el proceso; cualquier flujo E2E que dependa de OpenCTI real
-(por ejemplo simular con muestra en vivo) debe tolerar el error esperado.
+No usa una instancia OpenCTI real (spec/PROJECT-MAP.md limite conocido): el
+Hub arranca standalone, sin conexion a OpenCTI configurada (ver
+hub/opencti_settings_store.py); cualquier flujo E2E que dependa de OpenCTI
+real (por ejemplo simular con muestra en vivo) debe tolerar el error
+esperado ("opencti_not_configured").
 """
 import json
 import os
@@ -26,8 +27,6 @@ shutil.rmtree(FEEDS_DIR, ignore_errors=True)
 os.makedirs(STATE_DIR, exist_ok=True)
 os.makedirs(FEEDS_DIR, exist_ok=True)
 
-os.environ.setdefault("OPENCTI_URL", "https://opencti.invalid")
-os.environ.setdefault("OPENCTI_SERVICE_ACCOUNT_TOKEN", "e2e-fake-token")
 os.environ["HUB_STATE_DIR"] = STATE_DIR
 os.environ["TXT_FEED_DIR"] = FEEDS_DIR
 os.environ["ADMIN_UI_ORIGINS"] = "http://localhost:4200"

@@ -56,6 +56,70 @@
 
 <h2>Configuracion operativa</h2>
 <p class="unavailable">
-  No disponible todavia: no hay endpoints para editar umbrales de alerta ni retencion de logs/eventos (ver
-  spec/PROJECT-MAP.md).
+  Umbrales de alerta y retencion de logs/eventos: sin editar todavia (ver spec/PROJECT-MAP.md).
 </p>
+
+@if (canManageTokens()) {
+  <h3>Tokens API</h3>
+
+  @if (lastCreatedPlaintext(); as plaintext) {
+    <p class="token-plaintext" role="alert">
+      Token creado: <code>{{ plaintext }}</code> -- copialo ahora, no se vuelve a mostrar.
+    </p>
+  }
+
+  <div class="filters">
+    <mat-form-field appearance="outline">
+      <mat-label>Rol del nuevo token</mat-label>
+      <mat-select [ngModel]="newTokenRole()" (ngModelChange)="newTokenRole.set($event)">
+        @for (r of allRoles; track r) {
+          <mat-option [value]="r">{{ r }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+    <mat-form-field appearance="outline">
+      <mat-label>Expira en (dias, opcional)</mat-label>
+      <input
+        matInput
+        type="number"
+        min="1"
+        [ngModel]="newTokenExpiresInDays()"
+        (ngModelChange)="newTokenExpiresInDays.set($event)"
+      />
+    </mat-form-field>
+    <button mat-flat-button color="primary" (click)="createToken()">Crear token</button>
+  </div>
+
+  <table mat-table [dataSource]="tokens()" class="mat-elevation-z1 full-width">
+    <ng-container matColumnDef="role">
+      <th mat-header-cell *matHeaderCellDef>Rol</th>
+      <td mat-cell *matCellDef="let t">{{ t.role }}</td>
+    </ng-container>
+    <ng-container matColumnDef="created_at">
+      <th mat-header-cell *matHeaderCellDef>Creado</th>
+      <td mat-cell *matCellDef="let t">{{ t.created_at | date: 'short' }}</td>
+    </ng-container>
+    <ng-container matColumnDef="expires_at">
+      <th mat-header-cell *matHeaderCellDef>Expira</th>
+      <td mat-cell *matCellDef="let t">{{ t.expires_at ? (t.expires_at | date: 'short') : 'nunca' }}</td>
+    </ng-container>
+    <ng-container matColumnDef="revoked">
+      <th mat-header-cell *matHeaderCellDef>Estado</th>
+      <td mat-cell *matCellDef="let t">{{ t.revoked ? 'revocado' : 'activo' }}</td>
+    </ng-container>
+    <ng-container matColumnDef="actions">
+      <th mat-header-cell *matHeaderCellDef></th>
+      <td mat-cell *matCellDef="let t">
+        @if (!t.revoked) {
+          <button mat-button color="warn" (click)="revokeToken(t)">Revocar</button>
+        }
+      </td>
+    </ng-container>
+
+    <tr mat-header-row *matHeaderRowDef="tokenColumns"></tr>
+    <tr mat-row *matRowDef="let row; columns: tokenColumns"></tr>
+  </table>
+  @if (tokens().length === 0) {
+    <p>No hay tokens todavia (aparte del que estas usando para entrar).</p>
+  }
+}

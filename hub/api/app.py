@@ -21,16 +21,16 @@ from hub.api.audit_store import init_db as init_audit_db
 from hub.api.deps import APIState
 from hub.api.errors import api_error_handler, APIError, http_exception_handler, validation_exception_handler
 from hub.api.idempotency_store import init_db as init_idempotency_db
-from hub.api.routers import alerts, audit, deliveries, destinations, events, feeds, health, ingestion, oidc_auth, policies, secrets, taxii
+from hub.api.routers import alerts, audit, deliveries, destinations, events, feeds, health, ingestion, oidc_auth, opencti_settings, policies, secrets, taxii, tokens
 from hub.api.token_store import init_db as init_tokens_db
 from hub.config import HubConfig
 from hub.cursor_store import init_db as init_cursor_db
 from hub.destinations_store import init_db as init_destinations_db
 from hub.errors import ProblemDetail
-from hub.graphql_client import GraphQLClient
 from hub.alerting_store import init_db as init_alerts_db
 from hub.ingestion_control import init_db as init_ingestion_control_db
 from hub.ledger import init_db as init_ledger_db
+from hub.opencti_settings_store import init_db as init_opencti_settings_db
 from hub.policy_store import init_db as init_policies_db
 from hub.oidc_session_store import init_db as init_oidc_sessions_db
 from hub.secret_encryption import load_cipher
@@ -90,7 +90,7 @@ def create_app(config: HubConfig) -> FastAPI:
         secrets_conn=init_secrets_db(os.path.join(config.state_dir, "secrets.sqlite3")),
         secret_cipher=load_cipher(config),
         oidc_sessions_conn=init_oidc_sessions_db(os.path.join(config.state_dir, "oidc_sessions.sqlite3")),
-        graphql_client=GraphQLClient(config.opencti_url, config.opencti_token, verify=config.verify),
+        opencti_settings_conn=init_opencti_settings_db(os.path.join(config.state_dir, "opencti_settings.sqlite3")),
     )
     app.state.rate_limiter = _InMemoryRateLimiter()
 
@@ -169,6 +169,8 @@ def create_app(config: HubConfig) -> FastAPI:
     app.include_router(taxii.router)
     app.include_router(alerts.router)
     app.include_router(secrets.router)
+    app.include_router(opencti_settings.router)
+    app.include_router(tokens.router)
     app.include_router(oidc_auth.router)
 
     return app

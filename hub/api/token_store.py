@@ -17,12 +17,24 @@ import hashlib
 import json
 import secrets
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
 Role = Literal["viewer", "operator", "policy-admin", "security-admin"]
+
+# `verify_token` corre en el threadpool de FastAPI (`require_role` es una
+# dependencia sync) y se llama en CADA request autenticado sobre la MISMA
+# `sqlite3.Connection` compartida (una por proceso, ver hub/api/app.py) --
+# `check_same_thread=False` solo permite usarla desde threads distintos,
+# NO la hace segura para ejecutar sentencias concurrentes de verdad desde
+# varios threads a la vez (eso produce sqlite3.InterfaceError intermitente
+# bajo trafico paralelo). Un lock global es suficiente: esta app no tiene
+# volumen como para que serializar el acceso a esta tabla sea un cuello de
+# botella real.
+_LOCK = threading.Lock()
 
 # Jerarquia simple en vez de una matriz de permisos independiente: cada rol
 # de mayor privilegio cubre automaticamente las acciones del anterior, asi
@@ -89,20 +101,21 @@ def create_token(
         expires_at=expires_at,
         revoked=False,
     )
-    conn.execute(
-        "INSERT INTO api_tokens (token_id, token_hash, role, scopes, created_at, expires_at, revoked) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            token.token_id,
-            token.token_hash,
-            token.role,
-            json.dumps(token.scopes),
-            token.created_at.isoformat(),
-            token.expires_at.isoformat() if token.expires_at else None,
-            int(token.revoked),
-        ),
-    )
-    conn.commit()
+    with _LOCK:
+        conn.execute(
+            "INSERT INTO api_tokens (token_id, token_hash, role, scopes, created_at, expires_at, revoked) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                token.token_id,
+                token.token_hash,
+                token.role,
+                json.dumps(token.scopes),
+                token.created_at.isoformat(),
+                token.expires_at.isoformat() if token.expires_at else None,
+                int(token.revoked),
+            ),
+        )
+        conn.commit()
     return token, plaintext
 
 
@@ -126,9 +139,10 @@ def verify_token(conn: sqlite3.Connection, plaintext: str, *, now: Optional[date
     # memoria: la base solo guarda hashes, asi que esta consulta es la unica
     # forma de verificar un token sin tener que traer todas las filas.
     now = now or datetime.now(timezone.utc)
-    row = conn.execute(
-        f"SELECT {_COLUMNS} FROM api_tokens WHERE token_hash = ?", (_hash_token(plaintext),)
-    ).fetchone()
+    with _LOCK:
+        row = conn.execute(
+            f"SELECT {_COLUMNS} FROM api_tokens WHERE token_hash = ?", (_hash_token(plaintext),)
+        ).fetchone()
     if row is None:
         return None
     token = _row_to_token(row)
@@ -143,5 +157,21 @@ def verify_token(conn: sqlite3.Connection, plaintext: str, *, now: Optional[date
 
 
 def revoke(conn: sqlite3.Connection, token_id: str) -> None:
-    conn.execute("UPDATE api_tokens SET revoked = 1 WHERE token_id = ?", (token_id,))
-    conn.commit()
+    with _LOCK:
+        conn.execute("UPDATE api_tokens SET revoked = 1 WHERE token_id = ?", (token_id,))
+        conn.commit()
+
+
+def list_tokens(conn: sqlite3.Connection) -> list[APIToken]:
+    # Nunca se expone token_hash por la API (ver hub/api/routers/tokens.py):
+    # esta funcion devuelve el modelo completo, es el router quien decide
+    # que campos son seguros de serializar en la respuesta.
+    with _LOCK:
+        rows = conn.execute(f"SELECT {_COLUMNS} FROM api_tokens ORDER BY created_at DESC").fetchall()
+    return [_row_to_token(row) for row in rows]
+
+
+def get_token(conn: sqlite3.Connection, token_id: str) -> Optional[APIToken]:
+    with _LOCK:
+        row = conn.execute(f"SELECT {_COLUMNS} FROM api_tokens WHERE token_id = ?", (token_id,)).fetchone()
+    return _row_to_token(row) if row else None

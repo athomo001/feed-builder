@@ -1,34 +1,69 @@
-<h2 mat-dialog-title>Nueva politica (borrador)</h2>
+<h2 mat-dialog-title>{{ isEdit ? 'Editar politica' : 'Nueva politica (borrador)' }}</h2>
 <mat-dialog-content class="form-grid">
   <mat-form-field appearance="outline">
     <mat-label>policy_id</mat-label>
-    <input matInput [ngModel]="policyId()" (ngModelChange)="policyId.set($event)" />
+    <input matInput [ngModel]="policyId()" (ngModelChange)="policyId.set($event)" [disabled]="isEdit" />
   </mat-form-field>
 
   <mat-form-field appearance="outline">
     <mat-label>Destino</mat-label>
-    <mat-select [ngModel]="destinationId()" (ngModelChange)="destinationId.set($event)">
+    <mat-select [ngModel]="destinationId()" (ngModelChange)="destinationId.set($event)" [disabled]="isEdit">
       @for (d of data.destinations; track d.destination_id) {
         <mat-option [value]="d.destination_id">{{ d.destination_id }} ({{ d.name }})</mat-option>
       }
     </mat-select>
   </mat-form-field>
 
-  <mat-form-field appearance="outline">
-    <mat-label>allowed_iocs (JSON)</mat-label>
-    <textarea matInput rows="3" [ngModel]="allowedIocsJson()" (ngModelChange)="allowedIocsJson.set($event)"></textarea>
-  </mat-form-field>
+  <div class="form-section">
+    <p class="form-section__title">Tipos de IOC permitidos</p>
+    <app-ioc-types-picker [value]="allowedTypes()" (valueChange)="onTypesChange($event)" />
+  </div>
 
-  <mat-form-field appearance="outline">
-    <mat-label>ttl_days (JSON)</mat-label>
-    <textarea matInput rows="2" [ngModel]="ttlDaysJson()" (ngModelChange)="ttlDaysJson.set($event)"></textarea>
-  </mat-form-field>
+  @if (selectedSubtypes().length > 0) {
+    <div class="form-section">
+      <p class="form-section__title">Vigencia y cantidad por subtipo</p>
+      <p class="hint">
+        El mas antiguo se descarta cuando se llena el cupo (Cantidad) o cuando vence el TTL, lo que pase primero.
+        Cantidad en 0 = sin tope propio (usa el limite general del destino, si tiene).
+      </p>
 
-  @if (jsonError()) {
-    <p class="form-error" role="alert">{{ jsonError() }}</p>
+      <div class="ttl-grid__row ttl-grid__bulk">
+        <span class="ttl-grid__subtype">Todos</span>
+        <mat-form-field appearance="outline" subscriptSizing="dynamic">
+          <mat-label>TTL para todos (dias)</mat-label>
+          <input matInput type="number" [ngModel]="bulkTtl()" (ngModelChange)="bulkTtl.set($event)" />
+        </mat-form-field>
+        <button mat-button type="button" (click)="applyBulkTtl()">Aplicar TTL a todos</button>
+        <mat-form-field appearance="outline" subscriptSizing="dynamic">
+          <mat-label>Cantidad para todos (0 = sin tope)</mat-label>
+          <input matInput type="number" [ngModel]="bulkMaxRecords()" (ngModelChange)="bulkMaxRecords.set($event)" />
+        </mat-form-field>
+        <button mat-button type="button" (click)="applyBulkMaxRecords()">Aplicar cantidad a todos</button>
+      </div>
+
+      <div class="ttl-grid">
+        @for (subtype of selectedSubtypes(); track subtype) {
+          <div class="ttl-grid__row">
+            <span class="ttl-grid__subtype">{{ subtype }}</span>
+            <mat-form-field appearance="outline" subscriptSizing="dynamic">
+              <mat-label>TTL {{ subtype }} (dias)</mat-label>
+              <input matInput type="number" [ngModel]="ttlDays()[subtype]" (ngModelChange)="setTtl(subtype, $event)" />
+            </mat-form-field>
+            <mat-form-field appearance="outline" subscriptSizing="dynamic">
+              <mat-label>Cantidad {{ subtype }} (0 = sin tope)</mat-label>
+              <input matInput type="number" [ngModel]="maxRecords()[subtype] || 0" (ngModelChange)="setMaxRecords(subtype, $event)" />
+            </mat-form-field>
+          </div>
+        }
+      </div>
+    </div>
+  }
+
+  @if (formError()) {
+    <p class="form-error" role="alert">{{ formError() }}</p>
   }
 </mat-dialog-content>
 <mat-dialog-actions align="end">
   <button mat-button (click)="cancel()">Cancelar</button>
-  <button mat-flat-button color="primary" (click)="save()">Crear borrador</button>
+  <button mat-flat-button color="primary" (click)="save()">{{ isEdit ? 'Guardar y publicar' : 'Crear borrador' }}</button>
 </mat-dialog-actions>

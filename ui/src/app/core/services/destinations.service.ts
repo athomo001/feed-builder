@@ -40,4 +40,8 @@ export class DestinationsService {
   resume(id: string): Observable<Destination> {
     return this.http.post<Destination>(`${this.base}/${encodeURIComponent(id)}/resume`, {});
   }
+
+  delete(id: string, reason: string): Observable<void> {
+    return this.http.delete<void>(`${this.base}/${encodeURIComponent(id)}`, { body: { reason } });
+  }
 }

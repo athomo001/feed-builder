@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from hub.graphql_client import GraphQLClient, extract_nodes
-from hub.graphql_indicator import BACKFILL_INDICATORS_QUERY, indicator_node_to_envelope
+from hub.graphql_indicator import BACKFILL_ACTIVE_ONLY_FILTERS, BACKFILL_INDICATORS_QUERY, indicator_node_to_envelope
 
 
 def _log(msg: str) -> None:
@@ -56,7 +56,13 @@ def run_backfill(
 
         data = client.query(
             BACKFILL_INDICATORS_QUERY,
-            {"first": max(1, page_size), "after": cursor, "orderBy": "modified", "orderMode": "desc"},
+            {
+                "first": max(1, page_size),
+                "after": cursor,
+                "orderBy": "modified",
+                "orderMode": "desc",
+                "filters": BACKFILL_ACTIVE_ONLY_FILTERS,
+            },
         )
         conn = data.get("indicators") or {}
         nodes, end_cursor, has_next = extract_nodes(conn)

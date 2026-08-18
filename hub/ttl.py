@@ -37,6 +37,23 @@ def effective_expiration(
     return min(candidates)
 
 
+def effective_expiration_for_policy(event: CanonicalIOCEvent, ttl_days_by_subtype: dict) -> Optional[datetime]:
+    """Como `effective_expiration`, pero `None` si la politica no declaro un
+    TTL propio para este subtipo, en vez de asumir el default global de
+    config -- los adapters file_feed (ver hub/adapters/factory.py) solo
+    reciben la politica activa, no la config completa del Hub, asi que un
+    subtipo sin TTL propio en la politica simplemente no vence solo (sigue
+    sujeto al `discard()` reactivo de siempre cuando llegue un evento nuevo).
+    Usado para completar `meta["valid_until"]` al escribir a un feed
+    materializado (hub/txt_feed.py::FeedWriter), que es lo que le permite a
+    `FeedWriter.rebuild()` vencer entradas solas, con el tiempo, sin esperar
+    un evento nuevo para ese IOC puntual."""
+    ttl_days = ttl_days_by_subtype.get(event.subtype)
+    if ttl_days is None:
+        return None
+    return effective_expiration(event, policy_ttl_days=ttl_days)
+
+
 def is_expired(
     event: CanonicalIOCEvent,
     *,

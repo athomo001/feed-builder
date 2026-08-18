@@ -30,6 +30,7 @@ class StixBundleAdapter:
         self.writer = StixBundleWriter(
             os.path.join(self.base_dir, "bundle.json"),
             max_records=destination.capacity.get("max_records_per_file", 0),
+            max_bytes=destination.capacity.get("max_file_size_bytes", 0),
             overflow_strategy=destination.capacity.get("overflow_strategy", "newest_first"),
         )
 

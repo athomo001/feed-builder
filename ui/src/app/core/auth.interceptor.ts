@@ -29,7 +29,14 @@ export const authInterceptor: HttpInterceptorFn = (req, next) => {
       if (err instanceof HttpErrorResponse) {
         const problem = (err.error ?? null) as ProblemDetail | null;
 
-        if (err.status === 401) {
+        // GET /auth/whoami devuelve 401 by-design cuando no hay sesion OIDC
+        // (ver AuthService.checkExistingSession, llamado solo al arrancar la
+        // app) -- es una consulta de "¿hay sesion?", no una accion
+        // autenticada que fallo. Tratarlo como cualquier otro 401 disparaba
+        // el toast/logout/redirect en cada carga de pagina aunque el
+        // usuario nunca hubiera tenido sesion (item #2 de ISSUES.md).
+        const isWhoamiCheck = req.url.endsWith('/auth/whoami');
+        if (err.status === 401 && !isWhoamiCheck) {
           auth.logout();
           notifications.error('Token invalido, revocado o expirado. Volve a pegar un token valido.');
           router.navigateByUrl('/login');

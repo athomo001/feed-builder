@@ -9,7 +9,7 @@ import { AuthService } from '../../core/auth.service';
 import { NotificationService } from '../../core/notification.service';
 import { pollingSignal } from '../../core/polling';
 import { DestinationsService } from '../../core/services';
-import { Destination, DestinationCreate, roleSatisfies } from '../../core/models';
+import { Destination, DestinationCreate, DestinationUpdate, roleSatisfies } from '../../core/models';
 import { ConfirmService } from '../../shared/confirm-dialog/confirm.service';
 import { StatusBadgeComponent } from '../../shared/status-badge/status-badge.component';
 import { DestinationFormDialogComponent, DestinationFormDialogData } from './destination-form-dialog.component';
@@ -43,7 +43,7 @@ export class DestinationsComponent {
     this.dialog
       .open<DestinationFormDialogComponent, DestinationFormDialogData, DestinationCreate | null>(
         DestinationFormDialogComponent,
-        { data: { mode: 'create' } },
+        { data: { mode: 'create' }, width: '720px', maxWidth: '90vw' },
       )
       .afterClosed()
       .subscribe((payload) => {
@@ -62,12 +62,19 @@ export class DestinationsComponent {
     this.dialog
       .open<DestinationFormDialogComponent, DestinationFormDialogData, DestinationCreate | null>(
         DestinationFormDialogComponent,
-        { data: { mode: 'edit', destination } },
+        { data: { mode: 'edit', destination }, width: '720px', maxWidth: '90vw' },
       )
       .afterClosed()
       .subscribe((payload) => {
         if (!payload) return;
-        this.destinationsService.update(destination.destination_id, payload).subscribe({
+        // El dialog siempre devuelve la forma de DestinationCreate (incluye
+        // destination_id/adapter, deshabilitados pero presentes en el form).
+        // El endpoint de update (hub/api/schemas.py::DestinationUpdate) usa
+        // extra="forbid" y no declara esos dos campos a proposito (no se
+        // pueden cambiar en un destino existente) -- mandarlos rompia el
+        // update con 422 "Extra inputs are not permitted".
+        const { destination_id, adapter, ...update } = payload;
+        this.destinationsService.update(destination.destination_id, update as DestinationUpdate).subscribe({
           next: () => {
             this.notifications.success('Destino actualizado.');
             this.destinations.refresh();
@@ -110,6 +117,27 @@ export class DestinationsComponent {
             this.destinations.refresh();
           },
           error: (err) => this.notifications.error(err?.error?.detail ?? `No se pudo ${action} el destino.`),
+        });
+      });
+  }
+
+  delete(destination: Destination): void {
+    this.confirmService
+      .confirm({
+        title: 'Borrar destino',
+        message: `Vas a borrar "${destination.destination_id}" definitivamente. Las entregas ya hechas quedan en el historial, pero cualquier politica que le apunte deja de tener efecto.`,
+        confirmLabel: 'Borrar',
+        requireReason: true,
+        danger: true,
+      })
+      .subscribe(({ confirmed, reason }) => {
+        if (!confirmed || !reason) return;
+        this.destinationsService.delete(destination.destination_id, reason).subscribe({
+          next: () => {
+            this.notifications.success('Destino borrado.');
+            this.destinations.refresh();
+          },
+          error: (err) => this.notifications.error(err?.error?.detail ?? 'No se pudo borrar el destino.'),
         });
       });
   }

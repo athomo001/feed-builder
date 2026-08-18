@@ -27,13 +27,25 @@ from hub.alerting_store import init_db as init_alerts_db, list_alerts, resolve_a
 from hub.backfill import run_backfill
 from hub.config import HubConfig, load_config
 from hub.cursor_store import init_db as init_cursor_db, load_cursor, save_cursor
-from hub.destinations_store import init_db as init_destinations_db, list_destinations
+from hub.delivery_queue_store import (
+    allowed_sends_this_minute,
+    count_pending,
+    init_db as init_delivery_queue_db,
+    list_destinations_with_pending,
+    peek_batch,
+    record_sends,
+    remove as remove_from_queue,
+)
+from hub.delivery_runner import deliver
+from hub.destinations_store import get_destination, init_db as init_destinations_db, list_destinations
+from hub.feeds_maintenance import rebuild_all_feeds_for_destination
 from hub.graphql_client import GraphQLClient, PING_QUERY
 from hub.ingestion_control import get_control, init_db as init_ingestion_control_db, clear_reconcile_request, clear_rewind_request
 from hub.ledger import init_db as init_ledger_db, list_seen_stix_ids
+from hub.normalize import UnclassifiedIndicatorError
 from hub.opencti_settings_store import OpenCTIConnection, init_db as init_opencti_settings_db, resolve_opencti_connection
 from hub.pipeline import DedupState, process_envelope
-from hub.policy_store import init_db as init_policies_db
+from hub.policy_store import get_active_version_for_destination, init_db as init_policies_db
 from hub.reconcile import run_reconciliation
 from hub.retry import CircuitBreaker
 from hub.secret_encryption import load_cipher
@@ -114,6 +126,14 @@ def is_healthy(path: str, max_age_seconds: int = 600) -> bool:
 
 def stream_url(connection: OpenCTIConnection) -> str:
     if connection.stream_id:
+        # OpenCTI muestra el Live Stream configurado como una URL completa
+        # (`https://host:port/stream/<uuid>`) en su propia UI -- pegar eso tal
+        # cual en el campo "Stream ID" es un error facil (no hay forma de
+        # distinguirlo de un UUID a simple vista) que antes generaba una URL
+        # duplicada (`{url}/stream/https://.../stream/<uuid>`, nunca valida).
+        # Si ya viene como URL absoluta, se usa tal cual en vez de concatenar.
+        if connection.stream_id.startswith(("http://", "https://")):
+            return connection.stream_id
         return f"{connection.url}/stream/{connection.stream_id}"
     return f"{connection.url}/stream"
 
@@ -138,6 +158,7 @@ class HubRuntime:
         self.destinations_conn = init_destinations_db(os.path.join(config.state_dir, "destinations.sqlite3"))
         self.policies_conn = init_policies_db(os.path.join(config.state_dir, "policies.sqlite3"))
         self.ingestion_control_conn = init_ingestion_control_db(os.path.join(config.state_dir, "ingestion_control.sqlite3"))
+        self.delivery_queue_conn = init_delivery_queue_db(os.path.join(config.state_dir, "delivery_queue.sqlite3"))
         self.taxii_conn = init_taxii_db(os.path.join(config.state_dir, "taxii.sqlite3"))
         self.alerts_conn = init_alerts_db(os.path.join(config.state_dir, "alerts.sqlite3"))
         self.secrets_conn = init_secrets_db(os.path.join(config.state_dir, "secrets.sqlite3"))
@@ -169,12 +190,14 @@ class HubRuntime:
         # habilitarse/pausarse/editarse en caliente desde el Admin API.
         adapters = {}
         for destination in destinations:
+            policy = get_active_version_for_destination(self.policies_conn, destination.destination_id)
             adapters[destination.destination_id] = build_adapter(
                 destination,
                 txt_feed_dir=self.config.txt_feed_dir,
                 taxii_conn=self.taxii_conn,
                 secrets_conn=self.secrets_conn,
                 cipher=self.secret_cipher,
+                policy=policy,
             )
             if uses_circuit_breaker(destination):
                 self.circuit_breakers.setdefault(destination.destination_id, CircuitBreaker())
@@ -237,6 +260,7 @@ class HubRuntime:
             ledger_conn=self.ledger_conn,
             circuit_breakers=self.circuit_breakers,
             default_ttl_days=self.config.policy_ttl_days,
+            delivery_queue_conn=self.delivery_queue_conn,
         )
         self.seen_stix_ids.add(result.event.stix_id)
         return result
@@ -290,6 +314,109 @@ def run_reconciliation_phase(runtime: HubRuntime, connection: OpenCTIConnection)
     return report
 
 
+def _maybe_reconcile(runtime: HubRuntime, connection: OpenCTIConnection, next_reconcile_ts: float) -> float:
+    # Factorizado para poder llamarse tanto dentro del for de eventos SSE
+    # (el caso normal) como en cada vuelta del while externo de
+    # listen_live_stream (el caso "el stream nunca entrega un evento" --
+    # ver el comentario en el call site de esa vuelta). Siempre relee el
+    # control mas reciente en vez de recibirlo por parametro: es una lectura
+    # SQLite local, barata, y evita que un caller pase un `control` ya
+    # viejo por reusar el de una vuelta anterior.
+    config = runtime.config
+    now_ts = time.time()
+    control = get_control(runtime.ingestion_control_conn, config.source_id)
+    if now_ts >= next_reconcile_ts or control.reconcile_requested:
+        run_reconciliation_phase(runtime, connection)
+        next_reconcile_ts = now_ts + config.reconcile_interval_seconds
+        if control.reconcile_requested:
+            clear_reconcile_request(runtime.ingestion_control_conn, config.source_id)
+    return next_reconcile_ts
+
+
+def _drain_one_destination(runtime: HubRuntime, destination) -> None:
+    rate_limit = destination.capacity.get("rate_limit_per_minute", 0) if destination.capacity else 0
+    if not rate_limit:
+        # El rate limit se pudo sacar/desactivar despues de encolar: sin
+        # limite, no tiene sentido seguir esperando turno -- se vacia la
+        # cola entera de una (nunca se descarta, solo se manda ya).
+        allowed = None
+    else:
+        allowed = allowed_sends_this_minute(
+            runtime.delivery_queue_conn, destination.destination_id, rate_limit_per_minute=rate_limit
+        )
+        if allowed <= 0:
+            return
+
+    # batch_size acota cuanto se drena POR VUELTA del loop, independiente de
+    # cuanto permita la tasa (spec/04: son dos diales distintos). 0 = sin
+    # tope propio, solo lo limita la tasa (o nada, si tampoco hay rate_limit).
+    batch_size = destination.capacity.get("batch_size", 0) if destination.capacity else 0
+    limit = batch_size or (allowed if allowed is not None else None)
+    if limit is None:
+        limit = count_pending(runtime.delivery_queue_conn, destination.destination_id)
+    elif allowed is not None:
+        limit = min(limit, allowed)
+
+    items = peek_batch(runtime.delivery_queue_conn, destination.destination_id, limit)
+    if not items:
+        return
+
+    adapter = runtime._build_adapters([destination]).get(destination.destination_id)
+    sent = 0
+    for item in items:
+        deliver(
+            ledger_conn=runtime.ledger_conn,
+            event=item.event,
+            destination_id=destination.destination_id,
+            policy_version=item.policy_version,
+            adapter=adapter,
+            max_attempts=destination.retry.max_attempts,
+            circuit_breaker=runtime.circuit_breakers.get(destination.destination_id),
+            reason=item.reason,
+        )
+        remove_from_queue(runtime.delivery_queue_conn, item.id)
+        sent += 1
+    if rate_limit:
+        record_sends(runtime.delivery_queue_conn, destination.destination_id, sent)
+
+
+def drain_delivery_queues(runtime: HubRuntime) -> None:
+    # Corre en cada vuelta del loop de ingesta (ver call sites en
+    # listen_live_stream), no atado a que llegue un evento nuevo -- mismo
+    # razonamiento que _maybe_reconcile: si nunca llega un evento nuevo, la
+    # cola de un destino rate-limited igual tiene que seguir drenandose.
+    for destination_id in list_destinations_with_pending(runtime.delivery_queue_conn):
+        destination = get_destination(runtime.destinations_conn, destination_id)
+        if destination is None or not destination.enabled or destination.paused:
+            # No se pierde nada -- el item se queda en la cola hasta que el
+            # destino vuelva a estar habilitado/despausado.
+            continue
+        _drain_one_destination(runtime, destination)
+
+
+def _maybe_rebuild_feeds(runtime: HubRuntime, next_feed_rebuild_ts: float) -> float:
+    # Reconstruccion periodica de respaldo (spec/04 "Cadencia de renovacion
+    # (feeds materializados)"): sin esto, una entrada vencida por TTL solo se
+    # sacaba del feed cuando llegaba un evento NUEVO para ese IOC puntual --
+    # con el Live Stream sin conectar (o simplemente en un rato tranquilo),
+    # nunca pasaba. Mismo criterio que _maybe_reconcile/drain_delivery_queues:
+    # corre en cada vuelta del loop de ingesta, no atado a que llegue un
+    # evento real.
+    now_ts = time.time()
+    if now_ts < next_feed_rebuild_ts:
+        return next_feed_rebuild_ts
+    for destination in list_destinations(runtime.destinations_conn):
+        rebuild_all_feeds_for_destination(
+            destination,
+            txt_feed_dir=runtime.config.txt_feed_dir,
+            policies_conn=runtime.policies_conn,
+            taxii_conn=runtime.taxii_conn,
+            secrets_conn=runtime.secrets_conn,
+            cipher=runtime.secret_cipher,
+        )
+    return now_ts + runtime.config.feed_rebuild_interval_seconds
+
+
 # --- Live stream ---------------------------------------------------------
 
 
@@ -297,6 +424,15 @@ def run_reconciliation_phase(runtime: HubRuntime, connection: OpenCTIConnection)
 # en vez de bloquear indefinidamente: hay que seguir mandando heartbeat y
 # reaccionar rapido si un operador reanuda la ingesta.
 _PAUSE_POLL_INTERVAL_SECONDS = 5
+
+# Unicos tipos de `event:` del Live Stream de OpenCTI que representan un
+# cambio real sobre un objeto STIX (ver hub.normalize.ACTION_TO_OPERATION).
+# Confirmado contra una instancia real: ademas de estos, el stream manda
+# `connected` (payload de bienvenida), `heartbeat` (payload es un string
+# JSON, ni siquiera un dict) y `consumer_metrics` (metricas del propio
+# stream) cada pocos segundos -- ninguno de los tres tiene un IOC que
+# procesar, e intentarlo generaba antes un EVENT_PROCESS_ERROR por cada uno.
+_LIVE_STREAM_IOC_ACTIONS = {"create", "update", "delete"}
 
 
 def listen_live_stream(runtime: HubRuntime, *, session=None):
@@ -313,6 +449,7 @@ def listen_live_stream(runtime: HubRuntime, *, session=None):
     heartbeat_path = _heartbeat_path(config)
     next_reconcile_ts = time.time() + config.reconcile_interval_seconds
     next_alert_eval_ts = time.time() + _ALERT_EVAL_INTERVAL_SECONDS
+    next_feed_rebuild_ts = time.time() + config.feed_rebuild_interval_seconds
 
     # Loop de reconexion: una conexion SSE eventualmente se cae (red,
     # despliegue de OpenCTI, rotacion de balanceador) y hay que volver a
@@ -330,12 +467,20 @@ def listen_live_stream(runtime: HubRuntime, *, session=None):
             if time.time() >= next_alert_eval_ts:
                 runtime.evaluate_alerts()
                 next_alert_eval_ts = time.time() + _ALERT_EVAL_INTERVAL_SECONDS
+            # El drenado de colas rate-limited y el vencimiento por TTL no
+            # dependen de que la ingesta este activa: un destino puede
+            # seguir vaciando su cola / venciendo entradas viejas mientras el
+            # Live Stream esta pausado.
+            drain_delivery_queues(runtime)
+            next_feed_rebuild_ts = _maybe_rebuild_feeds(runtime, next_feed_rebuild_ts)
             time.sleep(_PAUSE_POLL_INTERVAL_SECONDS)
             continue
 
         connection = runtime.get_connection()
         if connection is None:
             write_heartbeat(heartbeat_path)  # el proceso sigue vivo, solo esperando config
+            drain_delivery_queues(runtime)
+            next_feed_rebuild_ts = _maybe_rebuild_feeds(runtime, next_feed_rebuild_ts)
             time.sleep(_PAUSE_POLL_INTERVAL_SECONDS)
             continue
 
@@ -344,6 +489,18 @@ def listen_live_stream(runtime: HubRuntime, *, session=None):
             last_event_id = control.rewind_to_cursor
             save_cursor(runtime.cursor_conn, config.source_id, last_event_id)
             clear_rewind_request(runtime.ingestion_control_conn, config.source_id)
+
+        # Chequeo de reconciliacion tambien aca (no solo dentro del for de
+        # abajo): si el stream SSE conecta pero nunca entrega un evento (el
+        # incidente de red ya documentado -- read timeout en loop contra
+        # OpenCTI), el for de mas abajo nunca corre ni una vuelta, y
+        # `reconcile_requested` quedaba pedido para siempre sin aplicarse
+        # nunca. Este chequeo corre en cada vuelta del while externo (o sea,
+        # como maximo una vez por intento de conexion/timeout), no depende
+        # de que llegue un evento real.
+        next_reconcile_ts = _maybe_reconcile(runtime, connection, next_reconcile_ts)
+        drain_delivery_queues(runtime)
+        next_feed_rebuild_ts = _maybe_rebuild_feeds(runtime, next_feed_rebuild_ts)
 
         request_headers = {
             "Authorization": f"Bearer {connection.token}",
@@ -366,19 +523,47 @@ def listen_live_stream(runtime: HubRuntime, *, session=None):
                     max_line_bytes=config.max_sse_line_bytes,
                     max_event_bytes=config.max_sse_event_bytes,
                 ):
-                    try:
-                        # Todavia no existe un event_id/delivery_id propios
-                        # del Hub en este punto (se generan dentro de
-                        # runtime.process) -- el unico identificador
-                        # disponible aca es el id: del propio stream SSE.
-                        with span("opencti.stream.receive", sse_event_id=sse_event.id or ""):
-                            envelope = json.loads(sse_event.data.decode("utf-8"))
-                            runtime.process(envelope)
-                    except Exception as e:
-                        # Un evento individual mal formado o que falla en
-                        # process() no debe tumbar todo el stream: se loguea
-                        # y se sigue con el proximo evento.
-                        _log(f"EVENT_PROCESS_ERROR: {e}")
+                    if sse_event.event in _LIVE_STREAM_IOC_ACTIONS:
+                        try:
+                            # Todavia no existe un event_id/delivery_id
+                            # propios del Hub en este punto (se generan
+                            # dentro de runtime.process) -- el unico
+                            # identificador disponible aca es el id: del
+                            # propio stream SSE.
+                            with span("opencti.stream.receive", sse_event_id=sse_event.id or ""):
+                                envelope = json.loads(sse_event.data.decode("utf-8"))
+                                # El payload de `data:` de OpenCTI no trae un
+                                # campo "action" propio (confirmado contra una
+                                # instancia real): la accion la indica solo la
+                                # linea SSE `event:` (create/update/delete),
+                                # que `hub.sse.iter_sse_events` preserva en
+                                # `sse_event.event` -- hay que inyectarla aca
+                                # para que hub.normalize la reconozca.
+                                envelope["action"] = sse_event.event
+                                runtime.process(envelope)
+                        except UnclassifiedIndicatorError as e:
+                            # Esperado y rutinario, no un error: el filtro del
+                            # stream configurado en OpenCTI puede incluir
+                            # tipos ademas de "Indicator" (ej. "Malware" en el
+                            # caso real que motivo este manejo especial), y
+                            # esos create/update arrastran consigo objetos de
+                            # referencia (identity, marking-definition, el
+                            # propio Malware) que nunca van a clasificar como
+                            # IOC. Se loguea aparte de EVENT_PROCESS_ERROR
+                            # para no interpretar como fallo algo que es
+                            # simplemente "no es un indicador".
+                            _log(f"EVENT_SKIPPED: {e}")
+                        except Exception as e:
+                            # Un evento individual mal formado o que falla en
+                            # process() no debe tumbar todo el stream: se
+                            # loguea y se sigue con el proximo evento.
+                            _log(f"EVENT_PROCESS_ERROR: {e}")
+                    # Cualquier otro `event:` (heartbeat/connected/
+                    # consumer_metrics/lo que OpenCTI agregue despues) es un
+                    # control frame sin IOC que procesar -- se ignora en
+                    # silencio en vez de loguear "accion desconocida" por
+                    # cada uno (llegan cada pocos segundos, son ruido
+                    # esperado, no un error).
 
                     if sse_event.id:
                         last_event_id = sse_event.id
@@ -388,11 +573,9 @@ def listen_live_stream(runtime: HubRuntime, *, session=None):
 
                     now_ts = time.time()
                     control = get_control(runtime.ingestion_control_conn, config.source_id)
-                    if now_ts >= next_reconcile_ts or control.reconcile_requested:
-                        run_reconciliation_phase(runtime, connection)
-                        next_reconcile_ts = now_ts + config.reconcile_interval_seconds
-                        if control.reconcile_requested:
-                            clear_reconcile_request(runtime.ingestion_control_conn, config.source_id)
+                    next_reconcile_ts = _maybe_reconcile(runtime, connection, next_reconcile_ts)
+                    drain_delivery_queues(runtime)
+                    next_feed_rebuild_ts = _maybe_rebuild_feeds(runtime, next_feed_rebuild_ts)
 
                     if now_ts >= next_alert_eval_ts:
                         runtime.evaluate_alerts()

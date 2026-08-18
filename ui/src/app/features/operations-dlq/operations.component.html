@@ -1,5 +1,14 @@
 <h1>Operaciones & DLQ</h1>
 
+@if (queueDepth().length > 0) {
+  <p class="queue-hint">
+    Esperando turno por limite de tasa (no es un error, se manda solo cuando haya cupo):
+    @for (q of queueDepth(); track q.destination_id) {
+      <span class="queue-hint__item">{{ q.destination_id }}: {{ q.pending }}</span>
+    }
+  </p>
+}
+
 <h2>Dead-letter queue</h2>
 <table mat-table [dataSource]="deadLetters()" class="mat-elevation-z1 full-width">
   <ng-container matColumnDef="event_id">
@@ -44,6 +53,15 @@
 }
 
 <h2>Feeds materializados</h2>
+<p class="ingestion-hint">
+  <app-status-badge [state]="ingestionState()" />
+  {{ ingestionStateLabel() }}
+  @if (ingestionState() === 'ok' || ingestionState() === 'down') {
+    (heartbeat hace {{ ingestionStatus()?.heartbeat_age_seconds | number: '1.0-0' }}s)
+  }
+  -- las "Entradas" de abajo solo suben si hay ingesta activa metiendo eventos nuevos.
+  <a routerLink="/ingestion">Ver detalle en Ingestion</a>
+</p>
 <table mat-table [dataSource]="feeds()" class="mat-elevation-z1 full-width">
   <ng-container matColumnDef="feed_id">
     <th mat-header-cell *matHeaderCellDef>Feed</th>
@@ -60,6 +78,15 @@
   <ng-container matColumnDef="entries">
     <th mat-header-cell *matHeaderCellDef>Entradas</th>
     <td mat-cell *matCellDef="let f">{{ f.entries }}</td>
+  </ng-container>
+  <ng-container matColumnDef="link">
+    <th mat-header-cell *matHeaderCellDef>Link</th>
+    <td mat-cell *matCellDef="let f">
+      <code class="feed-link">{{ feedUrl(f) }}</code>
+      <button mat-icon-button matTooltip="Copiar link" aria-label="Copiar link" (click)="copyFeedUrl(f)">
+        <mat-icon>content_copy</mat-icon>
+      </button>
+    </td>
   </ng-container>
   <ng-container matColumnDef="actions">
     <th mat-header-cell *matHeaderCellDef></th>

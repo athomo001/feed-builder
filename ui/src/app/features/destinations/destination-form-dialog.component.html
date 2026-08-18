@@ -24,42 +24,113 @@
     </mat-select>
   </mat-form-field>
 
-  <mat-form-field appearance="outline">
-    <mat-label>Formato</mat-label>
-    <input matInput [ngModel]="format()" (ngModelChange)="format.set($event)" />
-  </mat-form-field>
+  @if (usesNetwork()) {
+    <mat-form-field appearance="outline">
+      <mat-label>Endpoint</mat-label>
+      <input matInput [ngModel]="endpoint()" (ngModelChange)="endpoint.set($event)" placeholder="https://..." />
+    </mat-form-field>
 
-  <mat-form-field appearance="outline">
-    <mat-label>Endpoint (http_push)</mat-label>
-    <input matInput [ngModel]="endpoint()" (ngModelChange)="endpoint.set($event)" />
-  </mat-form-field>
+    <mat-form-field appearance="outline">
+      <mat-label>credential_ref (ej. env://QRADAR_TOKEN)</mat-label>
+      <input matInput [ngModel]="credentialRef()" (ngModelChange)="credentialRef.set($event)" />
+    </mat-form-field>
 
-  <mat-form-field appearance="outline">
-    <mat-label>credential_ref (ej. env://QRADAR_TOKEN)</mat-label>
-    <input matInput [ngModel]="credentialRef()" (ngModelChange)="credentialRef.set($event)" />
-  </mat-form-field>
+    <mat-checkbox [ngModel]="supportsDelete()" (ngModelChange)="supportsDelete.set($event)">Soporta delete</mat-checkbox>
 
-  <mat-form-field appearance="outline">
-    <mat-label>Tipos de IOC permitidos (family/subtype, separados por coma)</mat-label>
-    <input matInput [ngModel]="allowedIocTypes()" (ngModelChange)="allowedIocTypes.set($event)" placeholder="hash/sha256, red/ipv4" />
-  </mat-form-field>
+    <div class="form-section">
+      <p class="form-section__title">Limite de tasa</p>
+      <mat-form-field appearance="outline">
+        <mat-label>Eventos por minuto (0 = sin limite)</mat-label>
+        <input matInput type="number" [ngModel]="rateLimitPerMinute()" (ngModelChange)="rateLimitPerMinute.set($event)" />
+      </mat-form-field>
+      <mat-form-field appearance="outline">
+        <mat-label>Tamano de lote por vuelta (0 = sin tope propio)</mat-label>
+        <input matInput type="number" [ngModel]="batchSize()" (ngModelChange)="batchSize.set($event)" />
+      </mat-form-field>
+      <p class="hint">El excedente se encola y se manda despues, nunca se descarta.</p>
+    </div>
+  }
 
   <mat-form-field appearance="outline">
     <mat-label>Timeout (segundos)</mat-label>
     <input matInput type="number" [ngModel]="timeoutSeconds()" (ngModelChange)="timeoutSeconds.set($event)" />
   </mat-form-field>
 
-  <mat-checkbox [ngModel]="supportsDelete()" (ngModelChange)="supportsDelete.set($event)">Soporta delete</mat-checkbox>
+  @if (usesFile()) {
+    <div class="form-section">
+      <p class="form-section__title">Capacidad del archivo</p>
+      <mat-form-field appearance="outline">
+        <mat-label>Maximo de registros (0 = sin limite)</mat-label>
+        <input matInput type="number" [ngModel]="maxRecordsPerFile()" (ngModelChange)="maxRecordsPerFile.set($event)" />
+      </mat-form-field>
+      <mat-form-field appearance="outline">
+        <mat-label>Tamano maximo en bytes (0 = sin limite)</mat-label>
+        <input matInput type="number" [ngModel]="maxFileSizeBytes()" (ngModelChange)="maxFileSizeBytes.set($event)" />
+      </mat-form-field>
+      <mat-form-field appearance="outline">
+        <mat-label>Si se supera el limite, priorizar</mat-label>
+        <mat-select [ngModel]="overflowStrategy()" (ngModelChange)="overflowStrategy.set($event)">
+          <mat-option value="newest_first">Mas recientes</mat-option>
+          <mat-option value="highest_score_first">Mayor score</mat-option>
+          <mat-option value="longest_validity_first">Mayor vigencia (valid_until)</mat-option>
+        </mat-select>
+      </mat-form-field>
+    </div>
+  }
 
-  <mat-form-field appearance="outline">
-    <mat-label>capacity (JSON)</mat-label>
-    <textarea matInput rows="4" [ngModel]="capacityJson()" (ngModelChange)="capacityJson.set($event)"></textarea>
-  </mat-form-field>
+  @if (showsCsvOptions()) {
+    <div class="form-section">
+      <p class="form-section__title">Opciones CSV (Check Point)</p>
+      <mat-form-field appearance="outline">
+        <mat-label>Columnas (separadas por coma, debe incluir "value")</mat-label>
+        <input matInput [ngModel]="csvColumns()" (ngModelChange)="csvColumns.set($event)" />
+      </mat-form-field>
+      <mat-form-field appearance="outline">
+        <mat-label>Delimitador</mat-label>
+        <input matInput [ngModel]="csvDelimiter()" (ngModelChange)="csvDelimiter.set($event)" />
+      </mat-form-field>
+      <mat-form-field appearance="outline">
+        <mat-label>Quoting</mat-label>
+        <mat-select [ngModel]="csvQuoting()" (ngModelChange)="csvQuoting.set($event)">
+          <mat-option value="minimal">Minimal</mat-option>
+          <mat-option value="all">All</mat-option>
+          <mat-option value="nonnumeric">Nonnumeric</mat-option>
+          <mat-option value="none">None</mat-option>
+        </mat-select>
+      </mat-form-field>
+      <mat-checkbox [ngModel]="csvIncludeHeader()" (ngModelChange)="csvIncludeHeader.set($event)">Incluir fila de encabezado</mat-checkbox>
+    </div>
+  }
 
-  <mat-form-field appearance="outline">
-    <mat-label>format_options (JSON) -- ej. columns/list_name/reference_set_name segun el adapter</mat-label>
-    <textarea matInput rows="4" [ngModel]="formatOptionsJson()" (ngModelChange)="formatOptionsJson.set($event)"></textarea>
-  </mat-form-field>
+  @if (showsMikrotikOptions()) {
+    <div class="form-section">
+      <p class="form-section__title">Opciones MikroTik</p>
+      <mat-form-field appearance="outline">
+        <mat-label>Nombre del address-list</mat-label>
+        <input matInput [ngModel]="mikrotikListName()" (ngModelChange)="mikrotikListName.set($event)" />
+      </mat-form-field>
+    </div>
+  }
+
+  @if (showsWazuhOptions()) {
+    <div class="form-section">
+      <p class="form-section__title">Opciones Wazuh</p>
+      <mat-checkbox [ngModel]="wazuhIncludeTag()" (ngModelChange)="wazuhIncludeTag.set($event)">
+        Incluir subtipo como tag del valor (CDB)
+      </mat-checkbox>
+    </div>
+  }
+
+  @if (showsQradarOptions()) {
+    <div class="form-section">
+      <p class="form-section__title">Opciones QRadar</p>
+      <mat-form-field appearance="outline">
+        <mat-label>reference_set_name</mat-label>
+        <input matInput [ngModel]="qradarReferenceSetName()" (ngModelChange)="qradarReferenceSetName.set($event)" />
+      </mat-form-field>
+    </div>
+  }
+
   @if (jsonError()) {
     <p class="form-error" role="alert">{{ jsonError() }}</p>
   }

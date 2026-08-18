@@ -138,9 +138,17 @@ class StixBundleWriter:
     porque el adapter que lo envuelve es de vida corta (se reconstruye por
     evento/request)."""
 
-    def __init__(self, path: str, *, max_records: int = 0, overflow_strategy: OverflowStrategy = "newest_first"):
+    def __init__(
+        self,
+        path: str,
+        *,
+        max_records: int = 0,
+        max_bytes: int = 0,
+        overflow_strategy: OverflowStrategy = "newest_first",
+    ):
         self.path = path
         self.max_records = max_records
+        self.max_bytes = max_bytes
         self.overflow_strategy = overflow_strategy
         # normalized_value -> (sort_key, stix_object)
         self._objects: dict[str, tuple[float, dict]] = {}
@@ -173,14 +181,26 @@ class StixBundleWriter:
     def rebuild(self) -> FeedWriteResult:
         with span("feed.rebuild", feed_path=self.path):
             ordered = sorted(self._objects.items(), key=lambda kv: (-kv[1][0], kv[0]))
-            skipped_capacity = 0
-            if self.max_records and len(ordered) > self.max_records:
-                # Igual que en FeedWriter: ya esta ordenado por prioridad,
-                # asi que truncar la cola descarta los de menor prioridad.
-                skipped_capacity = len(ordered) - self.max_records
-                ordered = ordered[: self.max_records]
-            objects = [obj for _value, (_sort_key, obj) in ordered]
-            bundle = render_stix_bundle(objects)
+
+            # Mismo criterio que FeedWriter.rebuild (hub/txt_feed.py): un solo
+            # recorrido en orden de prioridad, corta en max_records O
+            # max_bytes, lo que se cumpla primero. El tamano por objeto es un
+            # estimado (JSON compacto del objeto solo, sin el overhead fijo y
+            # chico del wrapper del bundle/indentado) -- alcanza para un tope
+            # aproximado, no hace falta bytes exactos.
+            included: list[dict] = []
+            total_bytes = 0
+            for _value, (_sort_key, obj) in ordered:
+                if self.max_records and len(included) >= self.max_records:
+                    break
+                obj_bytes = len(json.dumps(obj, separators=(",", ":")).encode("utf-8"))
+                if self.max_bytes and total_bytes + obj_bytes > self.max_bytes:
+                    break
+                included.append(obj)
+                total_bytes += obj_bytes
+
+            skipped_capacity = len(ordered) - len(included)
+            bundle = render_stix_bundle(included)
 
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
             tmp_path = self.path + ".tmp"
@@ -190,4 +210,4 @@ class StixBundleWriter:
                 json.dump(bundle, f, indent=2)
             os.replace(tmp_path, self.path)
 
-            return FeedWriteResult(written=len(objects), skipped_capacity=skipped_capacity)
+            return FeedWriteResult(written=len(included), skipped_capacity=skipped_capacity)

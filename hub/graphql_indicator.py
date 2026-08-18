@@ -39,8 +39,8 @@ INDICATOR_FIELDS = """
 """
 
 BACKFILL_INDICATORS_QUERY = f"""
-query BackfillIndicators($first: Int!, $after: ID, $orderBy: IndicatorsOrdering, $orderMode: OrderingMode) {{
-  indicators(first: $first, after: $after, orderBy: $orderBy, orderMode: $orderMode) {{
+query BackfillIndicators($first: Int!, $after: ID, $orderBy: IndicatorsOrdering, $orderMode: OrderingMode, $filters: FilterGroup) {{
+  indicators(first: $first, after: $after, orderBy: $orderBy, orderMode: $orderMode, filters: $filters) {{
     edges {{
       node {{ {INDICATOR_FIELDS} }}
     }}
@@ -51,6 +51,38 @@ query BackfillIndicators($first: Int!, $after: ID, $orderBy: IndicatorsOrdering,
   }}
 }}
 """
+
+# El backfill ordena por "modified desc" para poder cortar apenas se cruza
+# la ventana temporal (ver hub/backfill.py) -- pero eso hace que una
+# revocacion masiva reciente en OpenCTI llene las primeras paginas de
+# indicadores revocados, sin nunca llegar a los activos (el Live Stream,
+# no el backfill, es quien entrega revocaciones para que un destino con
+# `supports_delete` los saque del feed). El backfill existe para ponerse al
+# dia con el estado ACTIVO actual, asi que pide solo `revoked: false` desde
+# la query en vez de traer de todo y filtrar despues -- confirmado con un
+# caso real: 321k indicadores revocados vs 34k activos en la misma
+# instancia dejaban el backfill sin encontrar ni un activo en 10 paginas.
+# Tipos que `hub.normalize.classify_stix` sabe clasificar (ver
+# STIX_OBSERVABLE_TYPE_TO_FAMILY_SUBTYPE y el caso especial StixFile). Se
+# filtra en la propia query, no despues de traer la pagina, por el mismo
+# motivo que el filtro de `revoked`: confirmado con un caso real donde
+# "Artifact"/"Text" (tipos sin adaptador, ninguno de los dos en este mapa)
+# eran el 96% de los indicadores mas recientemente modificados -- sin este
+# filtro, el backfill/reconciliacion (acotados por max_pages) se quedaban sin
+# cupo de paginas antes de llegar a los IOC reales (hash/IP/dominio/email)
+# que si tienen adaptador.
+BACKFILL_SUPPORTED_OBSERVABLE_TYPES = [
+    "StixFile", "IPv4-Addr", "IPv6-Addr", "Domain-Name", "Hostname", "Url", "Email-Addr",
+]
+
+BACKFILL_ACTIVE_ONLY_FILTERS = {
+    "mode": "and",
+    "filters": [
+        {"key": ["revoked"], "values": ["false"]},
+        {"key": ["x_opencti_main_observable_type"], "values": BACKFILL_SUPPORTED_OBSERVABLE_TYPES},
+    ],
+    "filterGroups": [],
+}
 
 # Usado para re-derivar el indicador por stix_id al reintentar una entrega,
 # en vez de cachear el payload completo: OpenCTI sigue siendo la fuente de

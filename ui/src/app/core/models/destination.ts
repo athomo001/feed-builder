@@ -25,7 +25,6 @@ export interface Destination {
   endpoint: string | null;
   credential_ref: string | null;
   format: string;
-  allowed_ioc_types: string[];
   format_options: Record<string, unknown>;
   capacity: Record<string, unknown>;
   supports_delete: boolean;
@@ -44,7 +43,6 @@ export interface DestinationCreate {
   endpoint?: string | null;
   credential_ref?: string | null;
   format?: string;
-  allowed_ioc_types?: string[];
   format_options?: Record<string, unknown>;
   capacity?: Record<string, unknown>;
   supports_delete?: boolean;

@@ -5,9 +5,10 @@
     @if (status(); as s) {
       <p>
         Estado:
-        <app-status-badge [state]="s.paused ? 'paused' : 'ok'" />
+        <app-status-badge [state]="healthState()" />
+        {{ healthLabel() }}
       </p>
-      <p>Cursor actual: {{ s.cursor_value || 'sin datos' }}</p>
+      <p>Cursor actual: {{ s.cursor_value || 'sin datos (nunca se recibio un evento)' }}</p>
       @if (s.cursor_updated_at) {
         <p>Ultima actualizacion del cursor: {{ s.cursor_updated_at }}</p>
       }

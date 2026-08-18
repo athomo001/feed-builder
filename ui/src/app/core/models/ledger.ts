@@ -28,3 +28,11 @@ export interface LedgerEntry {
 export function deliveryId(entry: Pick<LedgerEntry, 'event_id' | 'destination_id' | 'policy_version'>): string {
   return `${entry.event_id}::${entry.destination_id}::${entry.policy_version}`;
 }
+
+// Refleja GET /deliveries/queue -- cuantos eventos aceptados por politica
+// estan esperando turno para un destino con rate_limit_per_minute
+// configurado (estado PENDING en el ledger), sin haberse descartado.
+export interface QueueDepth {
+  destination_id: string;
+  pending: number;
+}

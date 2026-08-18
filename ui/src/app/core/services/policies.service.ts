@@ -30,11 +30,27 @@ export class PoliciesService {
     });
   }
 
-  publish(policyId: string, version: number, reason: string): Observable<PolicyVersion> {
-    return this.http.post<PolicyVersion>(`${this.base}/${encodeURIComponent(policyId)}/publish`, { version, reason });
+  publish(policyId: string, version: number, reason: string, confirmSignificantChange = false): Observable<PolicyVersion> {
+    return this.http.post<PolicyVersion>(`${this.base}/${encodeURIComponent(policyId)}/publish`, {
+      version,
+      reason,
+      confirm_significant_change: confirmSignificantChange,
+    });
   }
 
   rollback(policyId: string, version: number, reason: string): Observable<PolicyVersion> {
     return this.http.post<PolicyVersion>(`${this.base}/${encodeURIComponent(policyId)}/rollback`, { version, reason });
+  }
+
+  // Solo borra un draft que nunca se publico (409 si no) -- ver
+  // hub/policy_store.py::delete_draft_version.
+  deleteDraft(policyId: string, version: number, reason: string): Observable<void> {
+    return this.http.delete<void>(`${this.base}/${encodeURIComponent(policyId)}/versions/${version}`, { body: { reason } });
+  }
+
+  // Borrado real de TODAS las versiones (publicadas o no) -- ver
+  // hub/policy_store.py::delete_policy.
+  deletePolicy(policyId: string, reason: string): Observable<void> {
+    return this.http.delete<void>(`${this.base}/${encodeURIComponent(policyId)}`, { body: { reason } });
   }
 }

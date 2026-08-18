@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, Request, Response
 from fastapi.responses import JSONResponse
 
 from hub.adapters.factory import build_adapter
@@ -20,14 +20,16 @@ from hub.api.auth import require_role
 from hub.api.deps import APIState, get_state
 from hub.api.errors import APIError
 from hub.api.idempotency import with_idempotency
-from hub.api.schemas import DestinationCreate, DestinationTestRequest, DestinationUpdate
+from hub.api.schemas import DestinationCreate, DestinationTestRequest, DestinationUpdate, DiscardRequest
 from hub.destinations_store import (
     Destination,
+    delete_destination,
     get_destination,
     list_destinations,
     set_paused,
     upsert_destination,
 )
+from hub.policy_store import get_active_version_for_destination
 
 router = APIRouter(prefix="/admin/api/v1/destinations")
 
@@ -56,12 +58,16 @@ def _build_adapter(destination: Destination, state: APIState):
     # Centraliza el paso de las conexiones/config que cualquier adapter
     # podria necesitar (txt_feed_dir, taxii, secrets+cipher), para que el
     # router no tenga que saber cuales usa cada tipo de adapter en particular.
+    # Se pasa tambien la politica activa del destino: es la unica fuente de
+    # verdad de que tipos de IOC le llegan (ver hub/adapters/factory.py).
+    policy = get_active_version_for_destination(state.policies_conn, destination.destination_id)
     return build_adapter(
         destination,
         txt_feed_dir=state.config.txt_feed_dir,
         taxii_conn=state.taxii_conn,
         secrets_conn=state.secrets_conn,
         cipher=state.secret_cipher,
+        policy=policy,
     )
 
 
@@ -141,6 +147,33 @@ def update(
         compute=compute,
     )
     return JSONResponse(status_code=status_code, content=body)
+
+
+@router.delete("/{destination_id}", status_code=204)
+def delete(
+    destination_id: str,
+    payload: DiscardRequest,
+    request: Request,
+    state: APIState = Depends(get_state),
+    token=Depends(require_role("security-admin")),
+):
+    # Borrado real, pedido explicitamente por el operador (2026-08-18): un
+    # destino borrado simplemente deja de aparecer en `list_destinations`, y
+    # el pipeline (hub/pipeline.py) ya resuelve esa lista en cada evento, asi
+    # que una politica que le apuntaba queda inerte (no rompe nada) en vez de
+    # fallar. Historial de entregas pasadas en el ledger no se toca -- sigue
+    # existiendo, solo con un destination_id que ya no resuelve a un destino
+    # vigente.
+    existing = get_destination(state.destinations_conn, destination_id)
+    if existing is None:
+        raise APIError(404, "Not Found", f"destination '{destination_id}' no existe", error_code="destination_not_found")
+    delete_destination(state.destinations_conn, destination_id)
+    write_audit(
+        request, state, actor=token, action="destination.delete",
+        resource_type="destination", resource_id=destination_id,
+        before=existing.model_dump(mode="json"), reason=payload.reason,
+    )
+    return Response(status_code=204)
 
 
 @router.post("/{destination_id}/test")

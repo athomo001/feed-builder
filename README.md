@@ -40,7 +40,7 @@ Ver secciones 13 en adelante para la arquitectura real y vigente del Hub (`hub/`
 ## 4.2 Requisitos de OpenCTI
 
 - OpenCTI arriba y saludable, gestionado por fuera de este repositorio, alcanzable por HTTPS desde donde corre `hub-service`/`hub-api` (no hace falta estar en la misma red Docker: es una llamada saliente normal).
-- Token de cuenta de servicio (no administrativa) con permisos de stream y GraphQL — ver sección 13.2. Se carga desde la Admin UI (pantalla "Conexión OpenCTI") o vía `PUT /admin/api/v1/opencti-settings`, no desde `.env`.
+- Token de cuenta de servicio (no administrativa) con permisos de stream y GraphQL — ver `docs/RUNBOOK.md` §7 (crear y configurar el Live Stream correctamente, incluyendo el filtro de tipos y por qué no usar el token del admin). Se carga desde la Admin UI (pantalla "Conexión OpenCTI") o vía `PUT /admin/api/v1/opencti-settings`, no desde `.env`.
 
 ## 4.3 Requisitos de Nginx
 
@@ -54,19 +54,13 @@ Ver secciones 13 en adelante para la arquitectura real y vigente del Hub (`hub/`
 
 1. Copiar `.env.example` a `.env` y completar `PUBLIC_HOST` (y `NGINX_HTTPS_PORT` si el default 8446 no está libre). No hace falta nada de OpenCTI todavía — el Hub arranca standalone.
 2. Verificar que las rutas de host usadas en volúmenes existan y tengan permisos (o dejar los defaults relativos al repo, ver sección 4.1).
-3. Crear la red `hub-net` **una sola vez** (queda declarada como `external` en `docker-compose.yml` a propósito: crear una red Docker regenera las reglas de `iptables` del host, lo que en un host con muchas redes ya corriendo puede resetear brevemente conexiones TCP establecidas, como una sesión SSH -- dejarla pre-creada evita que ese evento se repita en cada `up`/`down`):
-
-```bash
-docker network create hub-net
-```
-
-4. Levantar el Hub:
+3. Levantar el Hub:
 
 ```bash
 docker compose up -d
 ```
 
-5. Validar estado (los 3 contenedores deben quedar `Up`/`healthy` aunque OpenCTI todavía no esté configurado):
+4. Validar estado (los 3 contenedores deben quedar `Up`/`healthy` aunque OpenCTI todavía no esté configurado):
 
 ```bash
 docker compose ps
@@ -75,7 +69,7 @@ docker compose logs -f hub-api
 docker compose logs -f nginx
 ```
 
-6. Generar el primer token de Admin API (sección 14.2) y, con él, configurar la conexión a OpenCTI vía la Admin UI (pantalla "Conexión OpenCTI") o directo por API (sección 14.3):
+5. Generar el primer token de Admin API (sección 14.2) y, con él, configurar la conexión a OpenCTI vía la Admin UI (pantalla "Conexión OpenCTI") o directo por API (sección 14.3):
 
 ```bash
 curl -s -X PUT https://$PUBLIC_HOST:$NGINX_HTTPS_PORT/admin/api/v1/opencti-settings -k \
@@ -85,7 +79,7 @@ curl -s -X PUT https://$PUBLIC_HOST:$NGINX_HTTPS_PORT/admin/api/v1/opencti-setti
 
 Recién en este punto `hub-service` deja de esperar y arranca el backfill + Live Stream.
 
-7. Probar la Admin API y los feeds desde red interna:
+6. Probar la Admin API y los feeds desde red interna:
 
 ```bash
 curl -k https://$PUBLIC_HOST:$NGINX_HTTPS_PORT/healthz/liveness
@@ -258,13 +252,16 @@ Práctica recomendada:
 
 ## 10.1 Comandos utiles
 
+`hub-service`/`hub-api` corren `python -m hub...` directo contra el codigo montado (bind mount, sin `--reload`): un cambio en un archivo bajo `hub/` queda en disco al instante, pero el proceso ya arrancado se queda con lo que tenia cargado en memoria hasta que se reinicia. `docker compose up -d` NO reinicia un contenedor que ya esta corriendo si no cambio la config del compose -- no alcanza para que un cambio de codigo tenga efecto. Regla simple para no tener que pensar cual servicio le toca a cada cambio: despues de tocar algo en `hub/` (o de correr `ng build` en la UI), reiniciar los tres:
+
+```bash
+docker compose restart
+```
+
 ```bash
 docker compose logs -f hub-service
 docker compose logs -f hub-api
 docker compose logs -f nginx
-docker compose restart hub-service
-docker compose restart hub-api
-docker compose restart nginx
 ```
 
 ## 10.2 Problemas comunes
@@ -393,7 +390,7 @@ curl -s -X POST http://localhost:8000/admin/api/v1/opencti-settings/test -H "Aut
 curl -s -X POST http://localhost:8000/admin/api/v1/destinations \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"destination_id": "fortigate-prod", "name": "Fortigate", "adapter": "txt_feed",
-       "allowed_ioc_types": ["hash/sha256"], "capacity": {"max_records_per_file": 20000}}'
+       "capacity": {"max_records_per_file": 20000}}'
 
 curl -s -X POST http://localhost:8000/admin/api/v1/policies \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -508,7 +505,7 @@ curl -s -X POST http://localhost:8000/admin/api/v1/destinations \
 curl -s -X POST http://localhost:8000/admin/api/v1/destinations \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"destination_id": "mikrotik-prod", "name": "MikroTik", "adapter": "mikrotik_rsc", "format": "rsc",
-       "allowed_ioc_types": ["network/ipv4", "network/cidr"], "format_options": {"list_name": "hub-blocklist"}}'
+       "format_options": {"list_name": "hub-blocklist"}}'
 
 # Wazuh (CDB list -- el Hub solo materializa el archivo; sincronizarlo al manager y recargar es responsabilidad externa)
 curl -s -X POST http://localhost:8000/admin/api/v1/destinations \

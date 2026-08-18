@@ -144,12 +144,4 @@ volumes:
   hub_feeds:
 
 networks:
-  # Pre-creada a mano UNA sola vez (`docker network create hub-net`, ver
-  # README.md #5) en vez de dejar que Compose la cree/borre en cada
-  # up/down: crear una red Docker regenera las reglas de iptables del host
-  # (cadenas DOCKER/FORWARD/NAT), lo que en hosts con muchas redes ya
-  # corriendo puede resetear brevemente conexiones TCP establecidas del
-  # host (ej. tu propia sesion SSH). Marcandola external, ese evento pasa
-  # una unica vez al crear la red a mano, no en cada `docker compose up`.
   hub-net:
-    external: true

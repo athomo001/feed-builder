@@ -18,13 +18,22 @@ from typing import Optional
 from hub.adapters.base import AdapterSendResult
 from hub.destinations_store import Destination
 from hub.models import CanonicalIOCEvent
+from hub.ttl import effective_expiration_for_policy
 from hub.txt_feed import FeedWriterRegistry
 
 
 class WazuhCdbAdapter:
-    def __init__(self, destination: Destination, *, base_dir: str):
+    def __init__(
+        self,
+        destination: Destination,
+        *,
+        base_dir: str,
+        subtype_max_records: Optional[dict] = None,
+        ttl_days: Optional[dict] = None,
+    ):
         self.destination = destination
         self.base_dir = os.path.join(base_dir, destination.destination_id)
+        self.ttl_days = ttl_days or {}
         opts = destination.format_options or {}
         # Convencion real de Wazuh para listas de pertenencia booleana: valor
         # vacio despues de los dos puntos. `include_tag=true` en
@@ -42,7 +51,9 @@ class WazuhCdbAdapter:
         self.registry = FeedWriterRegistry(
             self.base_dir,
             max_records=destination.capacity.get("max_records_per_file", 0),
+            max_bytes=destination.capacity.get("max_file_size_bytes", 0),
             overflow_strategy=destination.capacity.get("overflow_strategy", "newest_first"),
+            subtype_max_records=subtype_max_records,
             extension="cdb",
             render_line=self._render_line,
             parse_line=self._parse_line,
@@ -68,11 +79,16 @@ class WazuhCdbAdapter:
         return errors
 
     def render(self, event: CanonicalIOCEvent) -> dict:
+        expiration = effective_expiration_for_policy(event, self.ttl_days)
         return {
             "subtype": event.subtype,
             "value": event.normalized_value,
             "sort_key": event.modified_at.timestamp(),
-            "meta": {"subtype": event.subtype},
+            "meta": {
+                "subtype": event.subtype,
+                # Vence solo, con el tiempo, via FeedWriter.rebuild() -- ver hub/ttl.py.
+                "_expires_at": expiration.isoformat() if expiration else None,
+            },
         }
 
     def send(self, rendered: dict, *, idempotency_key: Optional[str] = None) -> AdapterSendResult:

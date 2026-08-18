@@ -20,6 +20,7 @@ from typing import Optional
 
 from hub.dedup import classify_duplicate, content_key, content_version_key
 from hub.delivery import DeliveryState
+from hub.delivery_queue_store import allowed_sends_this_minute, count_pending, enqueue, record_sends
 from hub.delivery_runner import deliver
 from hub.destinations_store import Destination
 from hub.ledger import LedgerEntry, upsert_delivery
@@ -55,15 +56,18 @@ class PipelineResult:
     ledger_entries: list[LedgerEntry] = field(default_factory=list)
 
 
-def _record(ledger_conn, event: CanonicalIOCEvent, destination_id: str, *, state, reason, now) -> LedgerEntry:
-    # Construccion compartida de LedgerEntry para los caminos que nunca
-    # llegan a intentar una entrega real (duplicado bloqueante, sin politica
-    # activa, revocado o expirado) y por eso no pasan por `deliver()`.
+def _record(ledger_conn, event: CanonicalIOCEvent, destination_id: str, *, state, reason, now, policy_version=0) -> LedgerEntry:
+    # Construccion compartida de LedgerEntry para los caminos que no llaman a
+    # `deliver()` directamente: duplicado bloqueante, sin politica activa,
+    # revocado/expirado (policy_version=0, nunca hubo una version real
+    # evaluada) o encolado por rate limit (policy_version real: `deliver()`
+    # va a reusar esta misma fila cuando el drain lo procese, ver
+    # `hub/service.py::drain_delivery_queues`).
     entry = LedgerEntry(
         event_id=event.event_id,
         stix_id=event.stix_id,
         destination_id=destination_id,
-        policy_version=0,
+        policy_version=policy_version,
         state=state,
         reason=reason,
         created_at=now,
@@ -86,6 +90,7 @@ def process_envelope(
     circuit_breakers: Optional[dict] = None,
     default_ttl_days: int = 30,
     now: Optional[datetime] = None,
+    delivery_queue_conn=None,
 ) -> PipelineResult:
     now = now or datetime.now(timezone.utc)
     circuit_breakers = circuit_breakers if circuit_breakers is not None else {}
@@ -136,6 +141,38 @@ def process_envelope(
         adapter = adapters.get(destination.destination_id)
 
         if decision.outcome is PolicyOutcome.ACCEPTED:
+            reason = dup_reason or ReasonCode.OK
+            rate_limit = destination.capacity.get("rate_limit_per_minute", 0) if destination.capacity else 0
+
+            # spec/04 "Capacidad y throughput por destino": destinos api_push
+            # limitan por tasa, no por capacidad de archivo -- "el worker
+            # respeta el limite y encola el excedente; nunca lo descarta".
+            # Se encola (en vez de entregar ya) si el destino ya tiene algo
+            # esperando (preserva orden FIFO: un evento nuevo no puede pasar
+            # adelante de lo que ya esta encolado) o si la ventana de este
+            # minuto ya se agoto.
+            if rate_limit and delivery_queue_conn is not None:
+                already_queued = count_pending(delivery_queue_conn, destination.destination_id) > 0
+                allowed_now = allowed_sends_this_minute(
+                    delivery_queue_conn, destination.destination_id, rate_limit_per_minute=rate_limit, now=now
+                )
+                if already_queued or allowed_now <= 0:
+                    enqueue(
+                        delivery_queue_conn,
+                        destination_id=destination.destination_id,
+                        policy_version=policy.version,
+                        reason=reason,
+                        event=event,
+                        now=now,
+                    )
+                    entry = _record(
+                        ledger_conn, event, destination.destination_id,
+                        state=DeliveryState.PENDING, reason=reason, now=now, policy_version=policy.version,
+                    )
+                    entries.append(entry)
+                    continue
+                record_sends(delivery_queue_conn, destination.destination_id, 1, now=now)
+
             entry = deliver(
                 ledger_conn=ledger_conn,
                 event=event,
@@ -144,7 +181,7 @@ def process_envelope(
                 adapter=adapter,
                 max_attempts=destination.retry.max_attempts,
                 circuit_breaker=circuit_breakers.get(destination.destination_id),
-                reason=dup_reason or ReasonCode.OK,
+                reason=reason,
                 now=now,
             )
             entries.append(entry)

@@ -17,27 +17,46 @@ from typing import Callable, Iterable
 
 from hub.backfill import BackfillResult, run_backfill
 from hub.graphql_client import GraphQLClient, extract_nodes
-from hub.graphql_indicator import BACKFILL_INDICATORS_QUERY
+from hub.graphql_indicator import BACKFILL_ACTIVE_ONLY_FILTERS, BACKFILL_INDICATORS_QUERY
 
 
-def find_gaps(client: GraphQLClient, *, since: datetime, seen_stix_ids: Iterable[str], page_size: int = 100) -> list[str]:
+def find_gaps(
+    client: GraphQLClient, *, since: datetime, seen_stix_ids: Iterable[str], page_size: int = 100, max_pages: int = 10,
+) -> list[str]:
     """Devuelve los `stix_id` que GraphQL reporta modificados desde `since`
     pero que no estan en `seen_stix_ids` (lo que el ledger local ya proceso)."""
     seen = set(seen_stix_ids)
     gaps: list[str] = []
     cursor = None
 
-    # Se pagina de mas reciente a mas antiguo para poder cortar apenas se
-    # cruce `since`, sin tener que recorrer todo el historial de indicadores.
-    while True:
+    # Mismo filtro que el backfill (revoked=false + tipos con adaptador,
+    # BACKFILL_ACTIVE_ONLY_FILTERS): sin esto, esta consulta contaba como
+    # "brecha" cualquier indicador revocado o de un tipo sin adaptador
+    # (Artifact, Text...) -- esos nunca entran a `seen_stix_ids` porque
+    # backfill/Live Stream los descartan a proposito, asi que aparecian como
+    # gap en TODAS las reconciliaciones, para siempre, sin que hubiera nada
+    # que reparar. Confirmado con un caso real: 44166 "gaps" reportados de
+    # una sola pasada, la enorme mayoria de tipos sin adaptador.
+    #
+    # `max_pages` (igual que `run_backfill`) acota cuanto se puede tardar
+    # esta funcion: sin tope, un catalogo grande con divergencia real
+    # paginaba sin limite (potencialmente cientos de paginas, cada una un
+    # roundtrip de red) y bloqueaba todo `listen_live_stream` -- heartbeat
+    # sin escribirse, sin reconectar el Live Stream -- mientras tanto.
+    pages = 0
+    while pages < max(1, max_pages):
         data = client.query(
             BACKFILL_INDICATORS_QUERY,
-            {"first": max(1, page_size), "after": cursor, "orderBy": "modified", "orderMode": "desc"},
+            {
+                "first": max(1, page_size), "after": cursor, "orderBy": "modified", "orderMode": "desc",
+                "filters": BACKFILL_ACTIVE_ONLY_FILTERS,
+            },
         )
         conn = data.get("indicators") or {}
         nodes, end_cursor, has_next = extract_nodes(conn)
         if not nodes:
             break
+        pages += 1
 
         window_reached = False
         for node in nodes:
@@ -72,7 +91,7 @@ def run_reconciliation(
     max_pages: int = 5,
     page_size: int = 100,
 ) -> ReconciliationReport:
-    gaps = find_gaps(client, since=since, seen_stix_ids=seen_stix_ids, page_size=page_size)
+    gaps = find_gaps(client, since=since, seen_stix_ids=seen_stix_ids, page_size=page_size, max_pages=max_pages)
     if not gaps:
         return ReconciliationReport(gaps_found=gaps)
 

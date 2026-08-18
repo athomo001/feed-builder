@@ -47,7 +47,13 @@
 
       <mat-form-field appearance="outline" style="width: 100%">
         <mat-label>Stream ID (opcional)</mat-label>
-        <input matInput [ngModel]="streamId()" (ngModelChange)="streamId.set($event)" [disabled]="!canManage()" />
+        <input
+          matInput
+          placeholder="ej: live, o el UUID del Live Stream (tambien acepta la URL completa que muestra OpenCTI)"
+          [ngModel]="streamId()"
+          (ngModelChange)="streamId.set($event)"
+          [disabled]="!canManage()"
+        />
       </mat-form-field>
 
       <mat-form-field appearance="outline" style="width: 100%">

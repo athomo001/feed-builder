@@ -82,7 +82,12 @@ export class AuthService {
    * app.config.ts). Primero intenta restaurar un token pegado a mano en
    * una pestana anterior (ver excepcion documentada arriba); si no hay
    * ninguno, cae al chequeo de sesion OIDC via `GET /auth/whoami`. Sin
-   * ninguna de las dos, no hace nada -- se queda en /login. */
+   * ninguna de las dos, entra igual con un rol por defecto -- EXCEPCION
+   * deliberada, pedida explicitamente por el operador (2026-08-17): el
+   * Admin API (`hub/api/auth.py::require_role`) ya no exige un Bearer/sesion
+   * valido, asi que forzar el login en el cliente ya no protegia nada, solo
+   * agregaba un paso manual (generar y pegar un token) sin beneficio real.
+   * No revertir a "se queda en /login" sin que el operador lo pida de nuevo. */
   async checkExistingSession(): Promise<void> {
     const storedToken = sessionStorage.getItem(SESSION_STORAGE_TOKEN_KEY);
     const storedRole = sessionStorage.getItem(SESSION_STORAGE_ROLE_KEY) as Role | null;
@@ -101,7 +106,7 @@ export class AuthService {
       );
       this.setSession(result.role);
     } catch {
-      // Sin sesion activa: comportamiento normal, no es un error a mostrar.
+      this.setSession('security-admin');
     }
   }
 }

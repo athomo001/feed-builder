@@ -35,11 +35,17 @@
     <th mat-header-cell *matHeaderCellDef>Acciones</th>
     <td mat-cell *matCellDef="let d">
       @if (canManage()) {
-        <button mat-icon-button matTooltip="Probar conexion" (click)="test(d)"><mat-icon>network_check</mat-icon></button>
-        <button mat-icon-button matTooltip="Editar" (click)="edit(d)"><mat-icon>edit</mat-icon></button>
+        <button mat-icon-button matTooltip="Probar conexion" aria-label="Probar conexion" (click)="test(d)"><mat-icon>network_check</mat-icon></button>
+        <button mat-icon-button matTooltip="Editar" aria-label="Editar" (click)="edit(d)"><mat-icon>edit</mat-icon></button>
+        <button mat-icon-button matTooltip="Borrar" aria-label="Borrar" (click)="delete(d)"><mat-icon>delete</mat-icon></button>
       }
       @if (canOperate()) {
-        <button mat-icon-button [matTooltip]="d.paused ? 'Reanudar' : 'Pausar'" (click)="togglePause(d)">
+        <button
+          mat-icon-button
+          [matTooltip]="d.paused ? 'Reanudar' : 'Pausar'"
+          [attr.aria-label]="d.paused ? 'Reanudar' : 'Pausar'"
+          (click)="togglePause(d)"
+        >
           <mat-icon>{{ d.paused ? 'play_arrow' : 'pause' }}</mat-icon>
         </button>
       }

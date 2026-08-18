@@ -17,12 +17,14 @@ from hub.api.deps import APIState, get_graphql_client, get_state
 from hub.api.errors import APIError
 from hub.api.schemas import DiscardRequest
 from hub.delivery import DeliveryState
+from hub.delivery_queue_store import count_pending, list_destinations_with_pending
 from hub.delivery_runner import deliver
 from hub.destinations_store import get_destination
 from hub.graphql_indicator import GET_INDICATOR_QUERY, indicator_node_to_envelope
 from hub.ledger import get_delivery, list_dead_letters, upsert_delivery
 from hub.normalize import normalize_stix_indicator
 from hub.policy import ReasonCode
+from hub.policy_store import get_active_version_for_destination
 from hub.retry import CircuitBreaker
 
 router = APIRouter(prefix="/admin/api/v1/deliveries")
@@ -51,6 +53,19 @@ def _parse_delivery_id(delivery_id: str) -> tuple[str, str, int]:
 @router.get("/dead-letters")
 def dead_letters(state: APIState = Depends(get_state), _token=Depends(require_role("viewer"))):
     return [e.model_dump(mode="json") for e in list_dead_letters(state.ledger_conn)]
+
+
+# spec/04 "El conteo de IOC excluidos por cupo... queda visible en la UI
+# junto al feed/destino afectado, no solo en logs" -- mismo criterio de
+# transparencia aplicado a lo que esta esperando turno por rate limit en vez
+# de descartado por capacidad: un operador viendo un delivery en PENDING
+# necesita poder confirmar que es "esperando su turno", no "se perdio".
+@router.get("/queue")
+def queue_depth(state: APIState = Depends(get_state), _token=Depends(require_role("viewer"))):
+    return [
+        {"destination_id": destination_id, "pending": count_pending(state.delivery_queue_conn, destination_id)}
+        for destination_id in sorted(list_destinations_with_pending(state.delivery_queue_conn))
+    ]
 
 
 @router.post("/{delivery_id}/retry")
@@ -107,6 +122,7 @@ def retry(
         taxii_conn=state.taxii_conn,
         secrets_conn=state.secrets_conn,
         cipher=state.secret_cipher,
+        policy=get_active_version_for_destination(state.policies_conn, destination_id),
     )
     # El breaker se busca/crea por destination_id y se guarda en el estado
     # compartido de la app (no por request): asi el estado abierto/cerrado

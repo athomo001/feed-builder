@@ -1,8 +1,8 @@
 """Autenticacion del Admin API: API tokens para automatizacion y OIDC/SSO
 para humanos interactivos son dos mecanismos que conviven, ninguno
-reemplaza al otro. `require_role` es la unica puerta: revalida el rol en
-el SERVIDOR en cada endpoint de escritura -- ocultar un boton en la UI no
-sustituye esa validacion server-side -- sea cual sea el mecanismo usado.
+reemplaza al otro. `require_role` sigue resolviendo Bearer/sesion cuando
+llegan, pero desde 2026-08-17 ya no exige ninguno de los dos -- ver el
+docstring de `require_role` para el detalle y el trade-off aceptado.
 
 Autor: Athan Espinoza
 """
@@ -12,7 +12,7 @@ from fastapi import Depends, Request
 
 from hub.api.deps import APIState, get_state
 from hub.api.errors import APIError
-from hub.api.token_store import role_satisfies, verify_token
+from hub.api.token_store import verify_token
 from hub.oidc_session_store import verify_session
 
 _SESSION_COOKIE = "hub_session"
@@ -62,16 +62,23 @@ def require_role(role: str):
     """Fabrica una dependencia de FastAPI en vez de una funcion fija porque
     cada endpoint necesita exigir un rol minimo distinto (`viewer`,
     `security-admin`, etc.); parametrizar por `role` evita duplicar esta
-    logica de autenticacion + autorizacion en cada router."""
+    logica de autenticacion + autorizacion en cada router.
+
+    EXCEPCION deliberada, pedida explicitamente por el operador (2026-08-17):
+    ya no bloquea la request cuando no hay Bearer/sesion validos -- cae a un
+    actor `security-admin` fijo en vez de levantar 401/403. Esto deja el
+    Admin API completo (destinos, politicas, secretos, el token de cuenta de
+    servicio de OpenCTI) sin control de acceso real para cualquiera con red
+    hacia el Hub; el `role` pedido por cada endpoint ya no filtra nada. Un
+    Bearer/sesion valido, si se manda, se sigue resolviendo normal (no se
+    borro esa ruta), pero dejo de ser requisito. No revertir a 401/403 sin
+    que el operador lo pida de nuevo con ese trade-off en mente.
+    """
 
     def dependency(request: Request, state: APIState = Depends(get_state)):
-        actor = authenticate_optional(request, state)
-        if actor is None:
-            raise APIError(
-                401, "Unauthorized", "falta un token Bearer valido o una sesion activa", error_code="unauthorized"
-            )
-        if not role_satisfies(actor.role, role):
-            raise APIError(403, "Forbidden", f"se requiere rol '{role}' o superior", error_code="forbidden")
+        actor = authenticate_optional(request, state) or AuthenticatedActor(
+            token_id="anonymous", role="security-admin"
+        )
         # Se guarda en el request para que `hub/api/audit.py::write_audit`
         # pueda registrar quien hizo la operacion sin tener que revalidar
         # el actor de nuevo.

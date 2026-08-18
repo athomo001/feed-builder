@@ -2,8 +2,19 @@
 
 <h2>Inspector del Event Ledger</h2>
 <p>
-  Buscador acotado a lo que el ledger ya guarda (event_id, stix_id, destino, estado, fecha) -- sin family/subtype/valor
-  por evento todavia (sin Canonical Event Store, ver spec/PROJECT-MAP.md).
+  El Event Ledger registra, para cada IOC que el Hub procesa, el intento de entrega a cada destino: a que destino se
+  mando, con que politica, en que estado quedo (entregado, reintentando, dead-letter, etc.) y cuando se actualizo por
+  ultima vez. Usa este buscador para responder "¿que paso con este IOC/evento?" -- por ejemplo, pegando un
+  <code>stix_id</code> de OpenCTI para ver a que destinos se distribuyo y si llego bien a todos.
+</p>
+<p class="hint">
+  Ejemplo: buscar por destino "<code>fortinet-edl</code>" y estado "<code>dead_letter</code>" muestra que IOCs de ese
+  destino estan fallando ahora mismo -- desde ahi, "Linea de tiempo" abre el detalle completo de ese evento.
+</p>
+<p class="unavailable">
+  Limite conocido (no bug): el buscador solo filtra por event_id/stix_id/destino/estado/fecha, los campos que el
+  ledger ya guarda hoy. Todavia no se puede filtrar por family/subtype/valor del IOC porque eso requiere un Canonical
+  Event Store aparte (ver spec/PROJECT-MAP.md).
 </p>
 
 <div class="filters">

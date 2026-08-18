@@ -28,6 +28,8 @@
     <td mat-cell *matCellDef="let p">
       @if (canManage()) {
         <button mat-button (click)="simulate(p.policy_id)">Simular</button>
+        <button mat-button (click)="editPolicy(p)">Editar</button>
+        <button mat-button color="warn" (click)="deletePolicy(p)">Borrar</button>
       }
     </td>
   </ng-container>
@@ -67,6 +69,9 @@
           }
           @if (v.status !== 'published' && v.status !== 'draft') {
             <button mat-button (click)="rollback(v)">Rollback</button>
+          }
+          @if (v.status === 'draft') {
+            <button mat-button color="warn" (click)="deleteDraft(v)">Borrar</button>
           }
         }
       </td>

@@ -23,6 +23,7 @@ from typing import Optional
 from hub.adapters.base import AdapterSendResult
 from hub.destinations_store import Destination
 from hub.models import CanonicalIOCEvent
+from hub.ttl import effective_expiration_for_policy
 from hub.txt_feed import FeedWriterRegistry
 
 # Set generico usado cuando el destino no especifica format_options.columns
@@ -45,9 +46,17 @@ def _sanitize_cell(value) -> str:
 
 
 class CsvFeedAdapter:
-    def __init__(self, destination: Destination, *, base_dir: str):
+    def __init__(
+        self,
+        destination: Destination,
+        *,
+        base_dir: str,
+        subtype_max_records: Optional[dict] = None,
+        ttl_days: Optional[dict] = None,
+    ):
         self.destination = destination
         self.base_dir = os.path.join(base_dir, destination.destination_id)
+        self.ttl_days = ttl_days or {}
         opts = destination.format_options or {}
         self.columns: list[str] = opts.get("columns") or list(DEFAULT_COLUMNS)
         self.delimiter: str = opts.get("delimiter", ",")
@@ -58,7 +67,9 @@ class CsvFeedAdapter:
         self.registry = FeedWriterRegistry(
             self.base_dir,
             max_records=destination.capacity.get("max_records_per_file", 0),
+            max_bytes=destination.capacity.get("max_file_size_bytes", 0),
             overflow_strategy=destination.capacity.get("overflow_strategy", "newest_first"),
+            subtype_max_records=subtype_max_records,
             extension="csv",
             render_line=self._render_line,
             parse_line=self._parse_line,
@@ -108,6 +119,13 @@ class CsvFeedAdapter:
         return errors
 
     def render(self, event: CanonicalIOCEvent) -> dict:
+        # "_expires_at" (con guion bajo, distinto de la columna "valid_until"
+        # de mas abajo) es la expiracion EFECTIVA segun el TTL de la politica
+        # activa -- la usa FeedWriter.rebuild() para vencer solo, con el
+        # tiempo, sin esperar un evento nuevo (ver hub/ttl.py). La columna
+        # "valid_until" sigue mostrando el valid_until crudo de OpenCTI (o
+        # vacio), sin cambios, para no alterar el CSV que ya consumia Check Point.
+        expiration = effective_expiration_for_policy(event, self.ttl_days)
         return {
             "subtype": event.subtype,
             "value": event.normalized_value,
@@ -120,6 +138,7 @@ class CsvFeedAdapter:
                 "markings": event.markings,
                 "created_at": event.created_at.isoformat(),
                 "valid_until": event.valid_until.isoformat() if event.valid_until else "",
+                "_expires_at": expiration.isoformat() if expiration else None,
             },
         }
 

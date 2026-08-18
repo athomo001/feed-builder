@@ -29,6 +29,12 @@ class HubConfig:
     backfill_window_days: int = 7
 
     reconcile_interval_seconds: int = 600
+    # Reconstruccion periodica de respaldo de los feeds materializados
+    # (spec/04 "Cadencia de renovacion (feeds materializados)"): sin esto,
+    # una entrada vencida por TTL solo se sacaba del feed cuando llegaba un
+    # evento nuevo para ese IOC puntual -- con el Live Stream sin conectar,
+    # nunca pasaba. Este loop (hub/service.py) la vence sola, con el tiempo.
+    feed_rebuild_interval_seconds: int = 300
 
     max_sse_line_bytes: int = 256 * 1024
     max_sse_event_bytes: int = 2 * 1024 * 1024
@@ -140,6 +146,7 @@ def load_config(env: Optional[dict] = None) -> HubConfig:
         backfill_page_size=env_int("BACKFILL_PAGE_SIZE", 100),
         backfill_window_days=env_int("BACKFILL_WINDOW_DAYS", 7),
         reconcile_interval_seconds=env_int("RECONCILE_INTERVAL_SECONDS", 600),
+        feed_rebuild_interval_seconds=env_int("FEED_REBUILD_INTERVAL_SECONDS", 300),
         max_sse_line_bytes=env_int("MAX_SSE_LINE_BYTES", 256 * 1024),
         max_sse_event_bytes=env_int("MAX_SSE_EVENT_BYTES", 2 * 1024 * 1024),
         txt_feed_dir=get("TXT_FEED_DIR", "./feeds"),

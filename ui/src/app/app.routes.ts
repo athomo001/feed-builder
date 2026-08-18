@@ -1,6 +1,6 @@
 import { Routes } from '@angular/router';
 
-import { requireRole } from './core/role.guard';
+import { redirectIfAuthenticated, requireRole } from './core/role.guard';
 
 // spec/07-ADMIN-UI-ANGULAR.md "Routing: rutas y componentes cargados
 // mediante lazy-loading"; "Guards: CanActivate basados en los roles
@@ -10,6 +10,7 @@ export const routes: Routes = [
   {
     path: 'login',
     loadComponent: () => import('./features/login/login.component').then((m) => m.LoginComponent),
+    canActivate: [redirectIfAuthenticated],
   },
   {
     path: 'forbidden',

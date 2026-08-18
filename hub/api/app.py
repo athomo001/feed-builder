@@ -25,6 +25,7 @@ from hub.api.routers import alerts, audit, deliveries, destinations, events, fee
 from hub.api.token_store import init_db as init_tokens_db
 from hub.config import HubConfig
 from hub.cursor_store import init_db as init_cursor_db
+from hub.delivery_queue_store import init_db as init_delivery_queue_db
 from hub.destinations_store import init_db as init_destinations_db
 from hub.errors import ProblemDetail
 from hub.alerting_store import init_db as init_alerts_db
@@ -85,6 +86,7 @@ def create_app(config: HubConfig) -> FastAPI:
         audit_conn=init_audit_db(os.path.join(config.state_dir, "audit.sqlite3")),
         ingestion_control_conn=init_ingestion_control_db(os.path.join(config.state_dir, "ingestion_control.sqlite3")),
         cursor_conn=init_cursor_db(os.path.join(config.state_dir, "cursor.sqlite3")),
+        delivery_queue_conn=init_delivery_queue_db(os.path.join(config.state_dir, "delivery_queue.sqlite3")),
         taxii_conn=init_taxii_db(os.path.join(config.state_dir, "taxii.sqlite3")),
         alerts_conn=init_alerts_db(os.path.join(config.state_dir, "alerts.sqlite3")),
         secrets_conn=init_secrets_db(os.path.join(config.state_dir, "secrets.sqlite3")),

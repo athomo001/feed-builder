@@ -22,3 +22,15 @@ export function requireRole(minRole: Role): CanActivateFn {
     return true;
   };
 }
+
+// Desde que `AuthService.checkExistingSession` entra sola con un rol por
+// defecto (2026-08-17, ver ese metodo), casi cualquier request ya llega
+// autenticado -- pero la ruta /login en si no tenia guard, asi que abrirla
+// directo (un tab vieja, un bookmark) seguia mostrando el formulario aunque
+// ya hubiera sesion. Este guard saca de /login a quien ya esta autenticado.
+export const redirectIfAuthenticated: CanActivateFn = () => {
+  const auth = inject(AuthService);
+  const router = inject(Router);
+
+  return auth.isAuthenticated() ? router.parseUrl('/') : true;
+};

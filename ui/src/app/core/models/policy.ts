@@ -12,6 +12,10 @@ export interface PolicyVersion {
   destination_id: string;
   allowed_iocs: AllowedIOC[];
   ttl_days: Record<string, number>;
+  // subtype -> cantidad maxima vigente (0/ausente = sin tope propio, usa el
+  // default parejo del destino). El mas viejo se descarta cuando se llena el
+  // cupo, independiente de si el TTL todavia no vencio.
+  max_records: Record<string, number>;
   status: PolicyStatus;
   created_at: string;
   published_at: string | null;
@@ -28,6 +32,7 @@ export interface PolicyCreate {
   destination_id: string;
   allowed_iocs: AllowedIOC[];
   ttl_days?: Record<string, number>;
+  max_records?: Record<string, number>;
 }
 
 export interface SimulationExample {

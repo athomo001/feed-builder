@@ -28,18 +28,37 @@ from hub.destinations_store import Destination
 NETWORK_ADAPTER_TYPES = frozenset({"http_push", "qradar_reference_set"})
 
 
-def build_adapter(destination: Destination, *, txt_feed_dir: str, taxii_conn=None, secrets_conn=None, cipher=None):
+def build_adapter(destination: Destination, *, txt_feed_dir: str, taxii_conn=None, secrets_conn=None, cipher=None, policy=None):
     # Dispatch centralizado (ver rationale en el docstring del modulo):
     # cada branch mapea 1:1 con un valor de destination.adapter.
+    # `policy.max_records`/`policy.ttl_days` (subtype -> cantidad/dias, ver
+    # hub/policy_store.py) solo aplican a los 4 adapters "un archivo por
+    # subtipo" -- stix_bundle_feed mezcla todos los subtipos en un unico
+    # bundle, no encaja en ese modelo.
+    subtype_max_records = policy.max_records if policy is not None else None
+    ttl_days = policy.ttl_days if policy is not None else None
+    # "family/subtype" que la politica activa permite para este destino --
+    # usado solo por mikrotik_rsc para validar en `validate()` que ningun
+    # subtipo no soportado por RouterOS address-list llegue a este destino
+    # (ver rationale en hub/adapters/mikrotik_adapter.py).
+    policy_allowed_ioc_types = (
+        [f"{a.family}/{s}" for a in policy.allowed_iocs for s in a.subtypes] if policy is not None else None
+    )
     adapter = destination.adapter
     if adapter == "txt_feed":
-        return TxtFeedAdapter(destination, base_dir=txt_feed_dir)
+        return TxtFeedAdapter(destination, base_dir=txt_feed_dir, subtype_max_records=subtype_max_records, ttl_days=ttl_days)
     if adapter == "csv_feed":
-        return CsvFeedAdapter(destination, base_dir=txt_feed_dir)
+        return CsvFeedAdapter(destination, base_dir=txt_feed_dir, subtype_max_records=subtype_max_records, ttl_days=ttl_days)
     if adapter == "mikrotik_rsc":
-        return MikrotikAdapter(destination, base_dir=txt_feed_dir)
+        return MikrotikAdapter(
+            destination,
+            base_dir=txt_feed_dir,
+            subtype_max_records=subtype_max_records,
+            ttl_days=ttl_days,
+            policy_allowed_ioc_types=policy_allowed_ioc_types,
+        )
     if adapter == "wazuh_cdb":
-        return WazuhCdbAdapter(destination, base_dir=txt_feed_dir)
+        return WazuhCdbAdapter(destination, base_dir=txt_feed_dir, subtype_max_records=subtype_max_records, ttl_days=ttl_days)
     if adapter == "stix_bundle_feed":
         return StixBundleAdapter(destination, base_dir=txt_feed_dir)
     if adapter == "qradar_reference_set":

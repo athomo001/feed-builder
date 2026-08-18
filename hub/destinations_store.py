@@ -3,9 +3,18 @@ el Hub distribuye IOC.
 
 SQLite, mismo estilo que `hub/cursor_store.py`/`hub/ledger.py`: modelo
 pydantic, columnas JSON para los campos anidados (capacity/retry/
-format_options/allowed_ioc_types) porque su forma varia segun el adapter
-(por ejemplo `capacity` cambia de shape segun `capacity["mode"]`) y no vale
-la pena modelar cada variante como columnas propias en la tabla.
+format_options) porque su forma varia segun el adapter (por ejemplo
+`capacity` cambia de shape segun `capacity["mode"]`) y no vale la pena
+modelar cada variante como columnas propias en la tabla.
+
+Nota: la columna `allowed_ioc_types` sigue existiendo en el schema (no se
+puede DROP COLUMN sin una migracion sobre bases ya desplegadas) pero ya no
+forma parte del modelo `Destination` -- que tipos de IOC llegan a un destino
+lo decide unicamente la politica de ese destino (`hub/policy_store.py`,
+`PolicyVersion.allowed_iocs`), pedido explicito del operador (2026-08-18):
+"destino es como se envia el dato, no que tipo de datos". Se sigue
+escribiendo `[]` en cada INSERT/UPDATE para no romper el NOT NULL de filas
+existentes.
 
 Autor: Athan Espinoza
 """
@@ -46,7 +55,6 @@ class Destination(BaseModel):
     endpoint: Optional[str] = None
     credential_ref: Optional[str] = None
     format: str = "txt"
-    allowed_ioc_types: list[str] = Field(default_factory=list)  # "family/subtype"
     format_options: dict = Field(default_factory=dict)
     capacity: dict = Field(default_factory=dict)  # shape depende de capacity["mode"]
     supports_delete: bool = False
@@ -96,7 +104,7 @@ def _row_to_destination(row) -> Destination:
         endpoint=row[5],
         credential_ref=row[6],
         format=row[7],
-        allowed_ioc_types=json.loads(row[8]),
+        # row[8] = allowed_ioc_types (columna legacy, ya no forma parte del modelo)
         format_options=json.loads(row[9]),
         capacity=json.loads(row[10]),
         supports_delete=bool(row[11]),
@@ -155,7 +163,7 @@ def upsert_destination(conn: sqlite3.Connection, destination: Destination) -> No
             destination.endpoint,
             destination.credential_ref,
             destination.format,
-            json.dumps(destination.allowed_ioc_types),
+            "[]",  # allowed_ioc_types: columna legacy, ver nota del modulo
             json.dumps(destination.format_options),
             json.dumps(destination.capacity),
             int(destination.supports_delete),

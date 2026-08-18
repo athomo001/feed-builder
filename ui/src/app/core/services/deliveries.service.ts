@@ -3,7 +3,7 @@ import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
 
 import { environment } from '../../../environments/environment';
-import { LedgerEntry } from '../models';
+import { LedgerEntry, QueueDepth } from '../models';
 
 // Wrapper 1:1 sobre hub/api/routers/deliveries.py. `id` es el delivery_id
 // codificado como `event_id::destination_id::policy_version`
@@ -15,6 +15,10 @@ export class DeliveriesService {
 
   deadLetters(): Observable<LedgerEntry[]> {
     return this.http.get<LedgerEntry[]>(`${this.base}/dead-letters`);
+  }
+
+  queue(): Observable<QueueDepth[]> {
+    return this.http.get<QueueDepth[]>(`${this.base}/queue`);
   }
 
   retry(id: string): Observable<LedgerEntry> {

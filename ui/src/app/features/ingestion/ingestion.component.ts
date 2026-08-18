@@ -7,6 +7,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 
 import { AuthService } from '../../core/auth.service';
+import { ingestionHealthLabel, ingestionHealthState } from '../../core/ingestion-status';
 import { NotificationService } from '../../core/notification.service';
 import { pollingSignal } from '../../core/polling';
 import { IngestionService } from '../../core/services';
@@ -34,6 +35,9 @@ export class IngestionComponent {
 
   readonly status = pollingSignal<IngestionStatus | null>(() => this.ingestionService.status(), 5000, null);
   readonly rewindCursor = signal('');
+
+  readonly healthState = () => ingestionHealthState(this.status());
+  readonly healthLabel = () => ingestionHealthLabel(this.healthState());
 
   readonly canOperate = () => roleSatisfies(this.auth.role(), 'operator');
   readonly canRewind = () => roleSatisfies(this.auth.role(), 'security-admin');

@@ -37,6 +37,7 @@ class APIState:
     audit_conn: object
     ingestion_control_conn: object
     cursor_conn: object
+    delivery_queue_conn: object
     opencti_settings_conn: object = None
     taxii_conn: object = None
     alerts_conn: object = None

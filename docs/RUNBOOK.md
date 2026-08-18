@@ -64,3 +64,91 @@ Script simple (sin dependencia nueva, `concurrent.futures` + `requests`) para un
 ## 6) Límites conocidos de este runbook
 
 Ver "Pendiente conocido: Entrega 5" en `spec/PROJECT-MAP.md`: sin chaos test de caída de destino/DB (solo caída de OpenCTI está cubierta), sin runbook de recuperación ante corrupción de una base SQLite puntual (el backup/restore completo es el único camino hoy), sin SLO de latencia por destino formalizado (Decisión #9 de spec/09 sigue abierta).
+
+## 7) Crear y configurar el Live Stream de OpenCTI para este Hub
+
+Diagnosticado en producción el 2026-08-18: sin un Live Stream bien configurado, el Hub puede quedar "conectado" en la UI (badge DEGRADED: "conectado, pero nunca recibió un evento real") sin entregar nada en tiempo real, aunque OpenCTI reciba IOC constantemente. Esta sección es la receta completa para que no vuelva a pasar.
+
+### 7.1 Por qué hace falta
+
+El backfill y la reconciliación (`hub/backfill.py`, `hub/reconcile.py`) solo hacen catch-up periódico por GraphQL — la reconciliación corre cada `RECONCILE_INTERVAL_SECONDS` (600s por defecto). El **Live Stream es la única vía de entrega en tiempo real** (create/update/delete al instante). Sin un stream que funcione, el Hub igual converge eventualmente, pero con hasta 10 minutos de atraso por defecto, no al instante.
+
+### 7.2 Filtro correcto: solo `entity_type = Indicator`
+
+`hub/normalize.py::classify_stix` únicamente sabe clasificar objetos STIX de tipo `indicator` (por `main_observable_type` en la extensión de OpenCTI). Cualquier otro tipo que el filtro del stream deje pasar explícitamente (`Malware`, `Threat-Actor`, etc.) se descarta siempre — no rompe nada (el Hub lo maneja de forma segura, ver `EVENT_SKIPPED` en 7.5), pero desperdicia ancho de banda del stream y ensucia los logs sin aportar nada. **No agregar otros tipos de entidad al filtro salvo que se extienda `hub/normalize.py` para soportarlos.**
+
+**Aun con este filtro puesto, va a seguir viéndose `EVENT_SKIPPED` con regularidad — eso es esperado, no un filtro mal puesto.** Confirmado contra una instancia real: cuando un conector crea/actualiza un Indicator, OpenCTI manda por el Live Stream, en la misma tanda y con `origin.referer: "init-dependencies"`, los objetos de contexto asociados (`identity`, `marking-definition`, el observable crudo del que deriva el patrón — `ipv4-addr`, `url`, `text`, etc. — y la `relationship` que lo une al indicador), **sin importar el filtro `entity_type`**. Es el comportamiento estándar del Live Stream de OpenCTI (pensado para que un consumidor tenga el contexto completo sin lookups aparte), no algo que se pueda desactivar desde el filtro. En una muestra real de 40 eventos sobre un stream filtrado a solo `Indicator`, ~42% fueron `indicator` (create/update, lo único que el Hub usa) y ~58% fueron estos objetos de contexto — `EVENT_SKIPPED` en esa proporción es normal, no señal de que algo esté mal.
+
+Filtro recomendado (formato `FilterGroup` de OpenCTI):
+
+```json
+{
+  "mode": "and",
+  "filters": [
+    {"key": ["entity_type"], "operator": "eq", "values": ["Indicator"], "mode": "or"}
+  ],
+  "filterGroups": []
+}
+```
+
+### 7.3 Opción A: crear el stream desde la UI de OpenCTI
+
+1. **Data → Data sharing → Live streams → Create a stream**.
+2. Nombre descriptivo (ej. `Feed Builder Hub - Indicators`) y descripción que deje claro que es específico de este Hub — no compartirlo con otro consumidor (QRadar, SOAR, etc.): un stream de otro equipo puede cambiar de filtro o borrarse sin aviso y tumbar la ingesta de este Hub sin que se note en el código.
+3. Agregar el filtro `Entity type = Indicator` (equivalente al JSON de 7.2).
+4. `Live` = sí. `Public` = no, salvo que se necesite explícitamente.
+5. Guardar. El ID del stream es el UUID al final de la URL del stream (`.../stream/<uuid>`) — copiarlo tal cual, o pegar la URL completa: `hub/service.py::stream_url` soporta ambos formatos sin duplicar el path.
+
+### 7.4 Opción B: crear el stream por API (scriptable)
+
+Requiere un token con capacidad de administrar streams (ver 7.6 sobre qué token usar).
+
+```bash
+curl -sk -X POST "$OPENCTI_URL/graphql" \
+  -H "Authorization: Bearer $OPENCTI_TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "query": "mutation CreateStream($input: StreamCollectionAddInput!) { streamCollectionAdd(input: $input) { id name filters stream_live stream_public } }",
+    "variables": {
+      "input": {
+        "name": "Feed Builder Hub - Indicators",
+        "description": "Live Stream dedicado para hub/ (feed-builder): solo Indicator.",
+        "filters": "{\"mode\":\"and\",\"filters\":[{\"key\":[\"entity_type\"],\"operator\":\"eq\",\"values\":[\"Indicator\"],\"mode\":\"or\"}],\"filterGroups\":[]}",
+        "stream_live": true,
+        "stream_public": false
+      }
+    }
+  }'
+```
+
+La respuesta trae el `id` del stream recién creado.
+
+### 7.5 Apuntar el Hub al stream y verificar
+
+```bash
+curl -sk -X PUT https://$PUBLIC_HOST:$NGINX_HTTPS_PORT/admin/api/v1/opencti-settings \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"url": "https://opencti.example.local:8443", "tls_verify": false, "stream_id": "<uuid-del-stream>"}'
+```
+
+`token` se puede omitir en este PUT si ya hay uno guardado (se conserva, ver `hub/api/schemas.py::OpenCTISettingsUpdate`) — no hace falta repegarlo solo para cambiar el `stream_id`. `url` sí es obligatorio en cada PUT aunque no cambie.
+
+Verificación:
+
+1. `POST /admin/api/v1/opencti-settings/test` → `{"ok": true}`.
+2. `docker compose logs -f hub-service` → debe verse `Connecting SSE: .../stream/<uuid-nuevo>` sin reconexiones constantes por 401/timeout.
+3. En régimen normal, **sin ningún `EVENT_PROCESS_ERROR`** (eso sí sería un problema real). `EVENT_SKIPPED` en cambio es esperado y puede ser más de la mitad del tráfico del stream (ver 7.2: OpenCTI manda los objetos de contexto de cada Indicator aunque el filtro solo pida `Indicator`) — no es señal de que el filtro esté mal puesto.
+4. Confirmar entrega real end-to-end: contar filas de `event_ledger` (`sqlite3 $HUB_STATE_DIR/ledger.sqlite3 "SELECT COUNT(*) FROM event_ledger"`) antes y después de esperar 1-2 minutos — debería crecer sin que haya corrido un backfill/reconciliación en el medio.
+
+### 7.6 Gotcha de plataforma ya resuelto en el código (para no re-diagnosticarlo)
+
+El payload `data:` del Live Stream de OpenCTI **no trae un campo `"action"`** — confirmado contra una instancia real, el shape es `{"data": {...STIX...}, "message": ..., "origin": ..., "version": "4"}`. La acción real (`create`/`update`/`delete`) viene **solo** en la línea SSE `event:`, que antes del 2026-08-18 `hub/sse.py` descartaba por completo. Esto hacía que el Live Stream se conectara "bien" pero nunca entregara un evento real — todo caía en `EVENT_PROCESS_ERROR: accion de envelope desconocida: None` (o `'str' object has no attribute 'get'` para los heartbeats, cuyo payload es un string JSON, no un dict).
+
+Ya está resuelto: `hub/sse.py::SSEEvent.event` conserva la línea `event:`, y `hub/service.py::listen_live_stream` la inyecta como `envelope["action"]` antes de procesar, ignorando en silencio los control frames (`heartbeat`, `connected`, `consumer_metrics`) que no traen ningún IOC. Si en algún momento se ve `EVENT_PROCESS_ERROR: accion de envelope desconocida: None` otra vez, ese fix se perdió o se revirtió — **no es un problema de configuración de OpenCTI ni del filtro del stream**, hay que revisar `hub/sse.py`/`hub/service.py` directamente.
+
+### 7.7 Cuenta de servicio: usar una dedicada, no el usuario admin
+
+Sección 4.2 del README ya pide "token de cuenta de servicio (no administrativa) con permisos de stream y GraphQL". En la práctica, crear un stream (mutación `streamCollectionAdd`) requiere permisos de administración de streams en OpenCTI — conviene crear el stream una vez con una cuenta con esos permisos, y después generar/asignar al Hub un token de una cuenta de servicio de solo lectura (GraphQL + consumo del stream específico), no el token personal del administrador. Si el Hub queda corriendo con el token de un admin real (capacidad `BYPASS`), cualquier fuga de ese token (logs, backup sin cifrar, etc.) compromete la instancia completa de OpenCTI, no solo la ingesta de IOC.
+
+### 7.8 Relacionado: filtro de tipos en backfill/reconciliación (no es este stream, pero es la misma familia de problema)
+
+Aparte del Live Stream, `hub/backfill.py`/`hub/reconcile.py` traen indicadores por GraphQL (no por el stream) para el catch-up inicial y periódico. Esa consulta también filtra por `x_opencti_main_observable_type` (`hub/graphql_indicator.py::BACKFILL_SUPPORTED_OBSERVABLE_TYPES`) por el mismo motivo que 7.2: sin ese filtro, tipos sin adaptador (`Artifact`, `Text`, etc.) pueden consumir casi todo el cupo de páginas (`BACKFILL_MAX_PAGES`/`BACKFILL_PAGE_SIZE`) antes de llegar a los IOC reales. Si se agrega soporte para un tipo de observable nuevo en `hub/normalize.py`, agregarlo también a esa lista — si no, el backfill lo sigue descartando aunque el Live Stream ya lo entregue bien.

@@ -28,6 +28,14 @@ DEFAULT_MAX_EVENT_BYTES = 2 * 1024 * 1024
 class SSEEvent:
     id: Optional[str]
     data: bytes
+    # El tipo (linea `event:`) es lo unico que indica la accion real de un
+    # evento del Live Stream de OpenCTI (create/update/delete) -- el propio
+    # payload JSON de `data:` no trae un campo "action" (confirmado contra
+    # una instancia real: el payload es `{"data": {...STIX...}, "message":
+    # ..., "origin": ..., "version": "4"}`, sin esa clave). Sin conservar
+    # este campo, el consumidor no tiene forma de distinguir un evento real
+    # de un control frame (`heartbeat`, `connected`, `consumer_metrics`).
+    event: Optional[str] = None
 
 
 def iter_sse_events(
@@ -46,11 +54,12 @@ def iter_sse_events(
     # contamine el siguiente.
     event_parts: list[bytes] = []
     event_id: Optional[str] = None
+    event_type: Optional[str] = None
     event_oversized = False
 
     def _reset():
-        nonlocal event_parts, event_id, event_oversized
-        event_parts, event_id, event_oversized = [], None, False
+        nonlocal event_parts, event_id, event_type, event_oversized
+        event_parts, event_id, event_type, event_oversized = [], None, None, False
 
     for raw in lines:
         if raw is None:
@@ -59,7 +68,7 @@ def iter_sse_events(
         if raw == b"":
             # Linea vacia = fin de evento en el protocolo SSE.
             if not event_oversized and event_parts:
-                yield SSEEvent(id=event_id, data=b"\n".join(event_parts))
+                yield SSEEvent(id=event_id, data=b"\n".join(event_parts), event=event_type)
             _reset()
             continue
 
@@ -70,6 +79,10 @@ def iter_sse_events(
 
         if raw.startswith(b"id:"):
             event_id = raw[3:].strip().decode("utf-8", errors="replace")
+            continue
+
+        if raw.startswith(b"event:"):
+            event_type = raw[6:].strip().decode("utf-8", errors="replace")
             continue
 
         if raw.startswith(b"data:") and not event_oversized:
@@ -87,4 +100,4 @@ def iter_sse_events(
 
     # El stream puede cerrar sin una linea vacia final: se entrega lo que quedo.
     if event_parts and not event_oversized:
-        yield SSEEvent(id=event_id, data=b"\n".join(event_parts))
+        yield SSEEvent(id=event_id, data=b"\n".join(event_parts), event=event_type)

@@ -34,7 +34,6 @@ class DestinationCreate(_Forbid):
     endpoint: Optional[str] = None
     credential_ref: Optional[str] = None
     format: str = "txt"
-    allowed_ioc_types: list[str] = Field(default_factory=list)
     format_options: dict = Field(default_factory=dict)
     capacity: dict = Field(default_factory=dict)
     supports_delete: bool = False
@@ -53,7 +52,6 @@ class DestinationUpdate(_Forbid):
     endpoint: Optional[str] = None
     credential_ref: Optional[str] = None
     format: Optional[str] = None
-    allowed_ioc_types: Optional[list[str]] = None
     format_options: Optional[dict] = None
     capacity: Optional[dict] = None
     supports_delete: Optional[bool] = None
@@ -67,6 +65,8 @@ class PolicyCreate(_Forbid):
     destination_id: str
     allowed_iocs: list[AllowedIOC]
     ttl_days: dict[str, int] = Field(default_factory=dict)
+    # subtype -> cantidad maxima vigente (ver hub/policy_store.py::PolicyVersion.max_records).
+    max_records: dict[str, int] = Field(default_factory=dict)
 
 
 class SimulateRequest(_Forbid):
@@ -77,6 +77,12 @@ class SimulateRequest(_Forbid):
 class VersionRequest(_Forbid):
     version: int
     reason: str
+    # Solo lo mira POST /publish (spec/04 "Exigir confirmacion para publicar
+    # si el volumen cambia de forma significativa"): si simular version vs.
+    # la activa muestra un cambio de volumen aceptado por encima del umbral
+    # y este campo sigue en False, el publish se rechaza en vez de aplicarse
+    # a ciegas. rollback lo ignora -- no tiene "candidata" que simular.
+    confirm_significant_change: bool = False
 
 
 class RewindRequest(_Forbid):

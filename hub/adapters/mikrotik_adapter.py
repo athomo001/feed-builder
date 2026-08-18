@@ -13,7 +13,13 @@ contra un router real.
 
 RouterOS `/ip firewall address-list` solo acepta IPv4/IPv6/CIDR -- nunca
 dominios ni hashes -- asi que este adapter rechaza en `validate()` cualquier
-`allowed_ioc_types` fuera de la familia `network`.
+subtipo fuera de la familia `network` que la politica activa de este
+destino permita. Antes esto se validaba contra un `Destination.
+allowed_ioc_types` configurable a mano en el propio destino, duplicando lo
+que la politica ya define -- pedido explicito del operador (2026-08-18):
+"destino es como se envia el dato, no que tipo de datos". Ahora se valida
+contra `policy.allowed_iocs`, la unica fuente de verdad de que tipos llegan
+a este destino.
 
 El `timeout=` de RouterOS (auto-remueve la entrada al vencer) mapea de forma
 natural al `valid_until` del IOC: se recalcula en cada rebuild a partir del
@@ -29,6 +35,7 @@ from typing import Optional
 from hub.adapters.base import AdapterSendResult
 from hub.destinations_store import Destination
 from hub.models import CanonicalIOCEvent
+from hub.ttl import effective_expiration_for_policy
 from hub.txt_feed import FeedWriterRegistry
 
 # Unicos tipos de IOC que RouterOS address-list puede almacenar; usado por
@@ -49,9 +56,21 @@ def _format_routeros_timeout(seconds: float) -> str:
 
 
 class MikrotikAdapter:
-    def __init__(self, destination: Destination, *, base_dir: str):
+    def __init__(
+        self,
+        destination: Destination,
+        *,
+        base_dir: str,
+        subtype_max_records: Optional[dict] = None,
+        ttl_days: Optional[dict] = None,
+        policy_allowed_ioc_types: Optional[list[str]] = None,
+    ):
         self.destination = destination
         self.base_dir = os.path.join(base_dir, destination.destination_id)
+        self.ttl_days = ttl_days or {}
+        # "family/subtype" permitidos por la politica activa de este destino
+        # (None si aun no hay politica publicada -- nada que validar todavia).
+        self.policy_allowed_ioc_types = policy_allowed_ioc_types
         opts = destination.format_options or {}
         self.list_name = opts.get("list_name", destination.destination_id)
         # Advertencia dejada dentro del propio archivo .rsc (no solo en el
@@ -66,7 +85,9 @@ class MikrotikAdapter:
         self.registry = FeedWriterRegistry(
             self.base_dir,
             max_records=destination.capacity.get("max_records_per_file", 0),
+            max_bytes=destination.capacity.get("max_file_size_bytes", 0),
             overflow_strategy=destination.capacity.get("overflow_strategy", "newest_first"),
+            subtype_max_records=subtype_max_records,
             extension="rsc",
             render_line=self._render_line,
             parse_line=self._parse_line,
@@ -96,18 +117,31 @@ class MikrotikAdapter:
         errors = []
         if self.destination.format not in ("rsc",):
             errors.append("adapter 'mikrotik_rsc' solo soporta destination.format == 'rsc'")
-        # Rechaza en configuracion, no en tiempo de envio: mejor que el
-        # operador vea el error al crear el destino que descubrir en runtime
-        # que RouterOS no puede aceptar un dominio/hash en address-list.
-        unsupported = [t for t in self.destination.allowed_ioc_types if not t.startswith(_SUPPORTED_PREFIXES)]
-        if unsupported:
-            errors.append(
-                f"adapter 'mikrotik_rsc' solo soporta IOC de red (ipv4/ipv6/cidr): "
-                f"RouterOS address-list no acepta {unsupported}"
-            )
+        # Rechaza en base a la politica activa, no en tiempo de envio: mejor
+        # que el operador vea el error al publicar una politica con un
+        # subtipo que RouterOS jamas podria aceptar en su address-list.
+        # Sin politica publicada todavia no hay nada que validar aca.
+        if self.policy_allowed_ioc_types:
+            unsupported = [t for t in self.policy_allowed_ioc_types if not t.startswith(_SUPPORTED_PREFIXES)]
+            if unsupported:
+                errors.append(
+                    f"adapter 'mikrotik_rsc' solo soporta IOC de red (ipv4/ipv6/cidr): "
+                    f"la politica activa de este destino permite {unsupported}, que RouterOS "
+                    "address-list no puede aceptar"
+                )
         return errors
 
     def render(self, event: CanonicalIOCEvent) -> dict:
+        # "valid_until" sigue siendo el valid_until crudo de OpenCTI, sin
+        # cambios -- es lo que ya alimentaba el timeout= de RouterOS.
+        # "_expires_at" es la expiracion EFECTIVA segun el TTL de la politica
+        # activa (None si la politica no declaro TTL propio para este
+        # subtipo): la usa FeedWriter.rebuild() para vencer solo, con el
+        # tiempo, sin esperar un evento nuevo (ver hub/ttl.py). Son dos cosas
+        # distintas a proposito -- RouterOS actua sobre su timeout= propio
+        # (siempre disponible si OpenCTI mando un valid_until), el Hub actua
+        # sobre lo que la politica configuro.
+        expiration = effective_expiration_for_policy(event, self.ttl_days)
         return {
             "subtype": event.subtype,
             "value": event.normalized_value,
@@ -116,6 +150,7 @@ class MikrotikAdapter:
                 "subtype": event.subtype,
                 "event_id": event.event_id,
                 "valid_until": event.valid_until.isoformat() if event.valid_until else None,
+                "_expires_at": expiration.isoformat() if expiration else None,
             },
         }
 

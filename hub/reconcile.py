@@ -15,9 +15,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Iterable
 
-from hub.backfill import BackfillResult, run_backfill
+from hub.backfill import BackfillResult, run_backfill, run_backfill_observables
 from hub.graphql_client import GraphQLClient, extract_nodes
 from hub.graphql_indicator import BACKFILL_ACTIVE_ONLY_FILTERS, BACKFILL_INDICATORS_QUERY
+from hub.graphql_observable import BACKFILL_OBSERVABLE_TYPES, BACKFILL_OBSERVABLES_QUERY, observable_node_to_envelopes
 
 
 def find_gaps(
@@ -96,6 +97,80 @@ def run_reconciliation(
         return ReconciliationReport(gaps_found=gaps)
 
     backfill_result = run_backfill(
+        client,
+        since=since,
+        max_pages=max_pages,
+        page_size=page_size,
+        on_envelope=on_envelope,
+    )
+    return ReconciliationReport(gaps_found=gaps, backfill_result=backfill_result)
+
+
+def find_gaps_observables(
+    client: GraphQLClient, *, since: datetime, seen_stix_ids: Iterable[str], page_size: int = 100, max_pages: int = 10,
+) -> list[str]:
+    """Analogo a `find_gaps`, pero sobre `stixCyberObservables`. Un nodo
+    StixFile puede derivar en varios `stix_id` sintenticos, uno por
+    algoritmo de hash (ver `hub.graphql_observable.observable_node_to_envelopes`)
+    -- el propio `standard_id` del nodo NUNCA aparece el solo en
+    `seen_stix_ids` (eso rompia esta deteccion con el mismo patron de falso
+    positivo permanente que ya se corrigio en `find_gaps` para Indicator:
+    comparar el id crudo del nodo, que jamas coincide con lo que
+    efectivamente se proceso), asi que se re-derivan los mismos ids
+    sinteticos que produciria el backfill/Live Stream y se compara cada uno
+    contra `seen_stix_ids`."""
+    seen = set(seen_stix_ids)
+    gaps: list[str] = []
+    cursor = None
+
+    pages = 0
+    while pages < max(1, max_pages):
+        data = client.query(
+            BACKFILL_OBSERVABLES_QUERY,
+            {
+                "first": max(1, page_size), "after": cursor, "orderBy": "updated_at", "orderMode": "desc",
+                "types": BACKFILL_OBSERVABLE_TYPES,
+            },
+        )
+        conn = data.get("stixCyberObservables") or {}
+        nodes, end_cursor, has_next = extract_nodes(conn)
+        if not nodes:
+            break
+        pages += 1
+
+        window_reached = False
+        for node in nodes:
+            modified_raw = node.get("updated_at") or node.get("created_at")
+            if modified_raw:
+                modified = datetime.fromisoformat(str(modified_raw).replace("Z", "+00:00"))
+                if modified < since:
+                    window_reached = True
+                    continue
+            derived_ids = [e["data"]["data"]["id"] for e in observable_node_to_envelopes(node, action="create")]
+            if derived_ids and any(i not in seen for i in derived_ids):
+                gaps.append(node.get("standard_id") or node["id"])
+
+        if window_reached or not has_next or not end_cursor:
+            break
+        cursor = end_cursor
+
+    return gaps
+
+
+def run_reconciliation_observables(
+    client: GraphQLClient,
+    *,
+    since: datetime,
+    seen_stix_ids: Iterable[str],
+    on_envelope: Callable[[dict], None],
+    max_pages: int = 5,
+    page_size: int = 100,
+) -> ReconciliationReport:
+    gaps = find_gaps_observables(client, since=since, seen_stix_ids=seen_stix_ids, page_size=page_size, max_pages=max_pages)
+    if not gaps:
+        return ReconciliationReport(gaps_found=gaps)
+
+    backfill_result = run_backfill_observables(
         client,
         since=since,
         max_pages=max_pages,

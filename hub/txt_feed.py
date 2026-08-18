@@ -106,8 +106,11 @@ class FeedWriter:
             return {}
         result = {}
         for value, entry in (raw or {}).items():
-            expires_at = entry.get("expires_at")
-            result[value] = (entry.get("sort_key", float("-inf")), {"_expires_at": expires_at} if expires_at else {})
+            # Se persiste el `meta` completo (no solo "_expires_at"): un
+            # adapter como wazuh_cdb/csv_feed guarda ahi datos propios
+            # (tag/score/confidence) que un `render_line` custom necesita en
+            # CADA rebuild, no solo en el evento que originalmente lo escribio.
+            result[value] = (entry.get("sort_key", float("-inf")), entry.get("meta") or {})
         return result
 
     def _load_existing(self) -> None:
@@ -129,7 +132,7 @@ class FeedWriter:
         # migrado) no aporta nada guardado como esta -- se recalcula solo
         # cuando un evento real lo toque, igual que hoy.
         payload = {
-            value: {"sort_key": sort_key, "expires_at": (meta or {}).get("_expires_at")}
+            value: {"sort_key": sort_key, "meta": meta or {}}
             for value, (sort_key, meta) in self._values.items()
             if math.isfinite(sort_key)
         }

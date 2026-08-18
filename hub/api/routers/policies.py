@@ -5,17 +5,19 @@ destino entero; la lectura solo requiere `viewer`.
 
 Autor: Athan Espinoza
 """
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, Request, Response
 from fastapi.responses import JSONResponse
 
+from hub.adapters.factory import build_adapter
 from hub.api.audit import write_audit
 from hub.api.auth import require_role
 from hub.api.deps import APIState, get_graphql_client, get_state
 from hub.api.errors import APIError
 from hub.api.idempotency import with_idempotency
-from hub.api.schemas import DiscardRequest, PolicyCreate, SimulateRequest, VersionRequest
+from hub.api.schemas import DiscardRequest, PolicyAssignmentsUpdate, PolicyCreate, SimulateRequest, VersionRequest
 from hub.api.routers.feeds import rebuild_all_feeds_for_destination
 from hub.destinations_store import get_destination
 from hub.policy_simulation import simulate as run_simulation
@@ -25,13 +27,58 @@ from hub.policy_store import (
     delete_policy,
     get_active_version,
     get_version,
+    list_assignments_for_policy,
     list_policy_ids,
     list_versions,
     publish,
     rollback,
+    set_policy_assignments,
 )
+from hub.resync import resync_destination
 
 router = APIRouter(prefix="/admin/api/v1/policies")
+
+
+def _resync_newly_assigned(state: APIState, policy_id: str, newly_assigned: list[str], graphql_client) -> None:
+    # Un destino recien asignado a una politica que YA tenia una version
+    # activa/publicada nunca recibe lo que otro destino ya proceso -- el
+    # deduplicado global de hub.pipeline es por evento, no por destino (ver
+    # docstring de hub/resync.py). Best-effort, mismo criterio que el gate
+    # de simulacion en publish_version: si OpenCTI no esta configurado o la
+    # llamada falla, no se bloquea la asignacion por eso -- el destino queda
+    # asignado igual, y la reconciliacion periodica lo termina poniendo al
+    # dia (mas lento, pero converge).
+    if not newly_assigned or graphql_client is None:
+        return
+    active = get_active_version(state.policies_conn, policy_id)
+    if active is None:
+        return
+    since = datetime.now(timezone.utc) - timedelta(days=state.config.backfill_window_days)
+    for destination_id in newly_assigned:
+        destination = get_destination(state.destinations_conn, destination_id)
+        if destination is None:
+            continue
+        adapter = build_adapter(
+            destination, txt_feed_dir=state.config.txt_feed_dir, taxii_conn=state.taxii_conn,
+            secrets_conn=state.secrets_conn, cipher=state.secret_cipher, policy=active,
+        )
+        try:
+            resync_destination(
+                graphql_client,
+                destination=destination,
+                source_id=state.config.source_id,
+                since=since,
+                max_pages=state.config.backfill_max_pages,
+                page_size=state.config.backfill_page_size,
+                policies_conn=state.policies_conn,
+                adapters={destination_id: adapter},
+                ledger_conn=state.ledger_conn,
+                circuit_breakers=state.circuit_breakers,
+                default_ttl_days=state.config.policy_ttl_days,
+                delivery_queue_conn=state.delivery_queue_conn,
+            )
+        except Exception as e:
+            print(f"[hub-api] RESYNC_ERROR: destino={destination_id!r} policy={policy_id!r}: {e}", flush=True)
 
 
 @router.get("")
@@ -45,9 +92,50 @@ def list_all(state: APIState = Depends(get_state), _token=Depends(require_role("
                 "policy_id": policy_id,
                 "active_version": active.version if active else None,
                 "version_count": len(versions),
+                "destination_ids": list_assignments_for_policy(state.policies_conn, policy_id),
             }
         )
     return out
+
+
+@router.put("/{policy_id}/assignments")
+def update_assignments(
+    policy_id: str,
+    payload: PolicyAssignmentsUpdate,
+    request: Request,
+    state: APIState = Depends(get_state),
+    graphql_client=Depends(get_graphql_client),
+    token=Depends(require_role("policy-admin")),
+):
+    if not list_versions(state.policies_conn, policy_id):
+        raise APIError(404, "Not Found", f"policy '{policy_id}' no existe", error_code="policy_not_found")
+    for destination_id in payload.destination_ids:
+        if get_destination(state.destinations_conn, destination_id) is None:
+            raise APIError(
+                422, "Unprocessable Entity", f"destination '{destination_id}' no existe", error_code="destination_not_found",
+            )
+
+    before = list_assignments_for_policy(state.policies_conn, policy_id)
+    set_policy_assignments(state.policies_conn, policy_id, payload.destination_ids)
+    # El cambio de asignacion tiene el mismo efecto practico que publicar una
+    # nueva version para esos destinos (un destino recien asignado empieza a
+    # aplicar esta politica, uno recien sacado deja de hacerlo) -- mismo
+    # motivo que rebuild_all_feeds_for_destination en publish/rollback: sin
+    # esto, el cambio quedaba guardado pero invisible en los feeds ya
+    # materializados hasta el proximo evento real.
+    for destination_id in set(before) | set(payload.destination_ids):
+        rebuild_all_feeds_for_destination(state, destination_id)
+    # Los destinos NUEVOS en el set (no los que ya estaban) se ponen al dia
+    # con lo que la politica ya venia entregando -- ver docstring de
+    # hub/resync.py y _resync_newly_assigned arriba.
+    _resync_newly_assigned(state, policy_id, list(set(payload.destination_ids) - set(before)), graphql_client)
+
+    write_audit(
+        request, state, actor=token, action="policy.update_assignments",
+        resource_type="policy", resource_id=policy_id,
+        before={"destination_ids": before}, after={"destination_ids": payload.destination_ids},
+    )
+    return {"policy_id": policy_id, "destination_ids": payload.destination_ids}
 
 
 @router.get("/{policy_id}/versions")
@@ -121,6 +209,7 @@ def create(
     payload: PolicyCreate,
     request: Request,
     state: APIState = Depends(get_state),
+    graphql_client=Depends(get_graphql_client),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     token=Depends(require_role("policy-admin")),
 ):
@@ -128,25 +217,35 @@ def create(
     # `with_idempotency` pueda decidir SI ejecutarlo (clave nueva) o
     # devolver la respuesta cacheada de un reintento sin correrlo de nuevo.
     def compute():
-        if get_destination(state.destinations_conn, payload.destination_id) is None:
-            raise APIError(
-                422, "Unprocessable Entity", f"destination '{payload.destination_id}' no existe",
-                error_code="destination_not_found",
-            )
+        for destination_id in payload.destination_ids:
+            if get_destination(state.destinations_conn, destination_id) is None:
+                raise APIError(
+                    422, "Unprocessable Entity", f"destination '{destination_id}' no existe",
+                    error_code="destination_not_found",
+                )
+        # Se lee ANTES de reasignar: "Editar politica" (UI) crea un draft
+        # nuevo con los mismos u otros destinos de una politica que puede
+        # llevar horas activa -- sin esta lectura previa, no habria forma de
+        # saber cuales de payload.destination_ids son realmente nuevos.
+        before = list_assignments_for_policy(state.policies_conn, payload.policy_id)
         version = create_draft(
             state.policies_conn,
             policy_id=payload.policy_id,
-            destination_id=payload.destination_id,
             allowed_iocs=payload.allowed_iocs,
             ttl_days=payload.ttl_days,
             max_records=payload.max_records,
         )
+        if payload.destination_ids:
+            set_policy_assignments(state.policies_conn, version.policy_id, payload.destination_ids)
+            _resync_newly_assigned(
+                state, version.policy_id, list(set(payload.destination_ids) - set(before)), graphql_client,
+            )
         write_audit(
             request, state, actor=token, action="policy.create_draft",
             resource_type="policy", resource_id=f"{version.policy_id}@v{version.version}",
-            after=version.model_dump(mode="json"),
+            after={**version.model_dump(mode="json"), "destination_ids": payload.destination_ids},
         )
-        return 201, version.model_dump(mode="json")
+        return 201, {**version.model_dump(mode="json"), "destination_ids": payload.destination_ids}
 
     status_code, body = with_idempotency(
         state, key=idempotency_key, endpoint="POST /policies", payload=payload.model_dump(mode="json"), compute=compute
@@ -235,8 +334,11 @@ def publish_version(
         # Sin esto, un cambio de politica (TTL, cantidad, tipos permitidos)
         # quedaba guardado pero invisible en los feeds ya materializados
         # hasta que llegara un evento nuevo o alguien reconstruyera a mano
-        # (bug real reportado por el operador, 2026-08-18).
-        rebuild_all_feeds_for_destination(state, version.destination_id)
+        # (bug real reportado por el operador, 2026-08-18). Una politica
+        # puede servir a varios destinos (2026-08-18): se reconstruyen todos
+        # los que la tengan asignada, no solo uno.
+        for destination_id in list_assignments_for_policy(state.policies_conn, policy_id):
+            rebuild_all_feeds_for_destination(state, destination_id)
         write_audit(
             request, state, actor=token, action="policy.publish",
             resource_type="policy", resource_id=f"{policy_id}@v{payload.version}",
@@ -270,7 +372,8 @@ def rollback_version(
         if get_version(state.policies_conn, policy_id, payload.version) is None:
             raise APIError(404, "Not Found", f"policy '{policy_id}' version {payload.version} no existe", error_code="policy_version_not_found")
         version = rollback(state.policies_conn, policy_id, payload.version)
-        rebuild_all_feeds_for_destination(state, version.destination_id)
+        for destination_id in list_assignments_for_policy(state.policies_conn, policy_id):
+            rebuild_all_feeds_for_destination(state, destination_id)
         write_audit(
             request, state, actor=token, action="policy.rollback",
             resource_type="policy", resource_id=f"{policy_id}@v{payload.version}",

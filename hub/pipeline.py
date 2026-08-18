@@ -10,7 +10,11 @@ el otro.
 
 Dedup (`event_id`/`content_version`/`same_value`) sigue siendo a nivel de
 evento, no por destino: esas capas de duplicacion operan sobre el objeto
-OpenCTI en si, no sobre a que destino se vaya a entregar.
+OpenCTI en si, no sobre a que destino se vaya a entregar. Consecuencia real
+(reportada por el operador, 2026-08-18): un destino asignado a una politica
+que YA tenia datos nunca recibe lo que otro destino ya proceso, porque ese
+evento queda "visto" globalmente. `process_envelope_for_destination` es la
+valvula de escape para ese caso puntual -- ver `hub/resync.py`.
 
 Autor: Athan Espinoza
 """
@@ -126,76 +130,133 @@ def process_envelope(
     entries: list[LedgerEntry] = []
 
     for destination in destinations:
-        # Se resuelve la version activa por destino en cada evento (no se
-        # cachea) porque un operador puede publicar una nueva politica en
-        # cualquier momento y el proximo evento debe evaluarse contra ella.
-        policy = get_active_version_for_destination(policies_conn, destination.destination_id)
-        if policy is None:
-            # Sin politica publicada y activa, el destino simplemente no
-            # participa: una politica es obligatoria antes de poder activar
-            # un destino, para evitar entregas sin reglas definidas.
-            continue
-
-        with span("policy.evaluate", event_id=event.event_id, stix_id=event.stix_id):
-            decision = evaluate_policy(event, policy, default_ttl_days=default_ttl_days, now=now)
-        adapter = adapters.get(destination.destination_id)
-
-        if decision.outcome is PolicyOutcome.ACCEPTED:
-            reason = dup_reason or ReasonCode.OK
-            rate_limit = destination.capacity.get("rate_limit_per_minute", 0) if destination.capacity else 0
-
-            # spec/04 "Capacidad y throughput por destino": destinos api_push
-            # limitan por tasa, no por capacidad de archivo -- "el worker
-            # respeta el limite y encola el excedente; nunca lo descarta".
-            # Se encola (en vez de entregar ya) si el destino ya tiene algo
-            # esperando (preserva orden FIFO: un evento nuevo no puede pasar
-            # adelante de lo que ya esta encolado) o si la ventana de este
-            # minuto ya se agoto.
-            if rate_limit and delivery_queue_conn is not None:
-                already_queued = count_pending(delivery_queue_conn, destination.destination_id) > 0
-                allowed_now = allowed_sends_this_minute(
-                    delivery_queue_conn, destination.destination_id, rate_limit_per_minute=rate_limit, now=now
-                )
-                if already_queued or allowed_now <= 0:
-                    enqueue(
-                        delivery_queue_conn,
-                        destination_id=destination.destination_id,
-                        policy_version=policy.version,
-                        reason=reason,
-                        event=event,
-                        now=now,
-                    )
-                    entry = _record(
-                        ledger_conn, event, destination.destination_id,
-                        state=DeliveryState.PENDING, reason=reason, now=now, policy_version=policy.version,
-                    )
-                    entries.append(entry)
-                    continue
-                record_sends(delivery_queue_conn, destination.destination_id, 1, now=now)
-
-            entry = deliver(
-                ledger_conn=ledger_conn,
-                event=event,
-                destination_id=destination.destination_id,
-                policy_version=policy.version,
-                adapter=adapter,
-                max_attempts=destination.retry.max_attempts,
-                circuit_breaker=circuit_breakers.get(destination.destination_id),
-                reason=reason,
-                now=now,
-            )
-            entries.append(entry)
-            continue
-
-        state = DeliveryState.REVOKED if decision.outcome is PolicyOutcome.REVOKED else (
-            DeliveryState.EXPIRED if decision.reason is ReasonCode.EXPIRED else DeliveryState.SKIPPED
+        entry = _process_for_destination(
+            event, destination, dup_reason=dup_reason,
+            policies_conn=policies_conn, adapters=adapters, ledger_conn=ledger_conn,
+            circuit_breakers=circuit_breakers, default_ttl_days=default_ttl_days,
+            now=now, delivery_queue_conn=delivery_queue_conn,
         )
-        if adapter is not None:
-            try:
-                adapter.discard(event)
-            except Exception:
-                pass  # best-effort: no bloquear el ledger por un fallo de discard
-        entry = _record(ledger_conn, event, destination.destination_id, state=state, reason=decision.reason, now=now)
-        entries.append(entry)
+        if entry is not None:
+            entries.append(entry)
 
     return PipelineResult(event=event, ledger_entries=entries)
+
+
+def _process_for_destination(
+    event: CanonicalIOCEvent,
+    destination: Destination,
+    *,
+    dup_reason: Optional[ReasonCode],
+    policies_conn,
+    adapters: dict,
+    ledger_conn,
+    circuit_breakers: dict,
+    default_ttl_days: int,
+    now: datetime,
+    delivery_queue_conn,
+) -> Optional[LedgerEntry]:
+    """Evalua un evento ya normalizado contra UN destino. Factorizado fuera
+    de `process_envelope` para poder reusarse desde `hub/resync.py` (poner
+    al dia un destino recien asignado a una politica que ya tenia datos, sin
+    pasar por el deduplicado global -- ver docstring de ese modulo)."""
+    # Se resuelve la version activa por destino en cada evento (no se
+    # cachea) porque un operador puede publicar una nueva politica en
+    # cualquier momento y el proximo evento debe evaluarse contra ella.
+    policy = get_active_version_for_destination(policies_conn, destination.destination_id)
+    if policy is None:
+        # Sin politica publicada y activa, el destino simplemente no
+        # participa: una politica es obligatoria antes de poder activar
+        # un destino, para evitar entregas sin reglas definidas.
+        return None
+
+    with span("policy.evaluate", event_id=event.event_id, stix_id=event.stix_id):
+        decision = evaluate_policy(event, policy, default_ttl_days=default_ttl_days, now=now)
+    adapter = adapters.get(destination.destination_id)
+
+    if decision.outcome is PolicyOutcome.ACCEPTED:
+        reason = dup_reason or ReasonCode.OK
+        rate_limit = destination.capacity.get("rate_limit_per_minute", 0) if destination.capacity else 0
+
+        # spec/04 "Capacidad y throughput por destino": destinos api_push
+        # limitan por tasa, no por capacidad de archivo -- "el worker
+        # respeta el limite y encola el excedente; nunca lo descarta".
+        # Se encola (en vez de entregar ya) si el destino ya tiene algo
+        # esperando (preserva orden FIFO: un evento nuevo no puede pasar
+        # adelante de lo que ya esta encolado) o si la ventana de este
+        # minuto ya se agoto.
+        if rate_limit and delivery_queue_conn is not None:
+            already_queued = count_pending(delivery_queue_conn, destination.destination_id) > 0
+            allowed_now = allowed_sends_this_minute(
+                delivery_queue_conn, destination.destination_id, rate_limit_per_minute=rate_limit, now=now
+            )
+            if already_queued or allowed_now <= 0:
+                enqueue(
+                    delivery_queue_conn,
+                    destination_id=destination.destination_id,
+                    policy_version=policy.version,
+                    reason=reason,
+                    event=event,
+                    now=now,
+                )
+                return _record(
+                    ledger_conn, event, destination.destination_id,
+                    state=DeliveryState.PENDING, reason=reason, now=now, policy_version=policy.version,
+                )
+            record_sends(delivery_queue_conn, destination.destination_id, 1, now=now)
+
+        return deliver(
+            ledger_conn=ledger_conn,
+            event=event,
+            destination_id=destination.destination_id,
+            policy_version=policy.version,
+            adapter=adapter,
+            max_attempts=destination.retry.max_attempts,
+            circuit_breaker=circuit_breakers.get(destination.destination_id),
+            reason=reason,
+            now=now,
+        )
+
+    state = DeliveryState.REVOKED if decision.outcome is PolicyOutcome.REVOKED else (
+        DeliveryState.EXPIRED if decision.reason is ReasonCode.EXPIRED else DeliveryState.SKIPPED
+    )
+    if adapter is not None:
+        try:
+            adapter.discard(event)
+        except Exception:
+            pass  # best-effort: no bloquear el ledger por un fallo de discard
+    return _record(ledger_conn, event, destination.destination_id, state=state, reason=decision.reason, now=now)
+
+
+def process_envelope_for_destination(
+    envelope: dict,
+    *,
+    event_id: str,
+    source_id: str,
+    destination: Destination,
+    policies_conn,
+    adapters: dict,
+    ledger_conn,
+    circuit_breakers: Optional[dict] = None,
+    default_ttl_days: int = 30,
+    now: Optional[datetime] = None,
+    delivery_queue_conn=None,
+) -> Optional[LedgerEntry]:
+    """Evalua un envelope contra UN SOLO destino, sin pasar por el
+    deduplicado global de `process_envelope` (`dedup_state`/`seen_event_ids`)
+    -- ese deduplicado es POR EVENTO, no por destino, asi que un IOC ya
+    entregado a otro destino nunca se re-evaluaba para uno nuevo, aunque ese
+    destino en particular nunca lo hubiera recibido. Usado exclusivamente
+    por `hub/resync.py` para poner al dia un destino recien asignado a una
+    politica que ya tenia datos (bug real reportado por el operador,
+    2026-08-18: agrego un destino Wazuh a una politica que ya alimentaba un
+    TXT hacia horas, y el Wazuh se quedo pegado en 1 entrada por subtipo)."""
+    now = now or datetime.now(timezone.utc)
+    circuit_breakers = circuit_breakers if circuit_breakers is not None else {}
+    with span("opencti.event.normalize", event_id=event_id):
+        event = normalize_stix_indicator(envelope, event_id=event_id, source_id=source_id)
+    return _process_for_destination(
+        event, destination, dup_reason=None,
+        policies_conn=policies_conn, adapters=adapters, ledger_conn=ledger_conn,
+        circuit_breakers=circuit_breakers, default_ttl_days=default_ttl_days,
+        now=now, delivery_queue_conn=delivery_queue_conn,
+    )

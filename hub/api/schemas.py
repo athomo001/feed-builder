@@ -62,11 +62,21 @@ class DestinationUpdate(_Forbid):
 
 class PolicyCreate(_Forbid):
     policy_id: str
-    destination_id: str
+    # Una politica puede servir a varios destinos a la vez (modelo N:1,
+    # 2026-08-18) -- vacio = politica sin destino asignado todavia, valida
+    # (se puede asignar despues via PUT .../assignments).
+    destination_ids: list[str] = Field(default_factory=list)
     allowed_iocs: list[AllowedIOC]
     ttl_days: dict[str, int] = Field(default_factory=dict)
     # subtype -> cantidad maxima vigente (ver hub/policy_store.py::PolicyVersion.max_records).
     max_records: dict[str, int] = Field(default_factory=dict)
+
+
+class PolicyAssignmentsUpdate(_Forbid):
+    # Set completo de destinos para esta politica: reemplaza la asignacion
+    # existente (agrega lo que falte, saca lo que ya no este en la lista) --
+    # ver hub/policy_store.py::set_policy_assignments.
+    destination_ids: list[str]
 
 
 class SimulateRequest(_Forbid):

@@ -13,6 +13,7 @@ responsabilidad externa al operador/automatizacion de su lado.
 Autor: Athan Espinoza
 """
 import os
+import re
 from typing import Optional
 
 from hub.adapters.base import AdapterSendResult
@@ -20,6 +21,57 @@ from hub.destinations_store import Destination
 from hub.models import CanonicalIOCEvent
 from hub.ttl import effective_expiration_for_policy
 from hub.txt_feed import FeedWriterRegistry
+
+# Prefijo en espanol por subtipo para el valor de la CDB list cuando
+# include_tag=true (pedido explicito del operador, 2026-08-18: "clave es el
+# IOC, valor es mas o menos lo que es el IOC", ej. "IP_MALICIOSA_BOTNET").
+# Subtipos sin entrada explicita caen al fallback generico en _tag_prefix
+# (el propio subtipo en mayusculas) -- no hace falta que esta lista este
+# completa para que el feature funcione.
+_SUBTYPE_PREFIX = {
+    "ipv4": "IP", "ipv6": "IP", "cidr": "IP", "mac-address": "MAC", "asn": "ASN",
+    "domain": "DOMINIO", "hostname": "DOMINIO", "fqdn": "DOMINIO",
+    "url": "URL", "uri": "URL", "user-agent": "USER_AGENT",
+    "email": "EMAIL", "username": "USUARIO", "phone": "TELEFONO",
+    "md5": "HASH", "sha1": "HASH", "sha224": "HASH", "sha256": "HASH", "sha384": "HASH", "sha512": "HASH",
+    "sha3-256": "HASH", "sha3-512": "HASH", "ssdeep": "HASH", "tlsh": "HASH", "imphash": "HASH",
+    "authentihash": "HASH", "pehash": "HASH", "custom-hash": "HASH",
+    "keyword": "PALABRA_CLAVE", "file-name": "ARCHIVO", "mutex": "MUTEX", "registry-key": "REGISTRO",
+    "process-name": "PROCESO", "service-name": "SERVICIO",
+    "cve": "CVE", "cwe": "CWE",
+}
+
+_NON_CDB_SAFE = re.compile(r"[^A-Z0-9]+")
+
+
+def _sanitize_for_cdb(text: str) -> str:
+    # El valor de una CDB list no puede llevar ':' (es el separador clave:valor
+    # del propio formato) -- se normaliza a mayusculas + "_" para cualquier
+    # caracter que no sea alfanumerico (labels de OpenCTI pueden traer
+    # espacios, guiones, tildes, mayuscula/minuscula mezclada) en vez de
+    # sanitizar solo ese caso puntual.
+    return _NON_CDB_SAFE.sub("_", text.upper()).strip("_")
+
+
+def _build_tag(event: CanonicalIOCEvent) -> str:
+    prefix = _SUBTYPE_PREFIX.get(event.subtype, event.subtype.upper())
+    # Los labels de OpenCTI (objectLabel, sin los que son marcado TLP -- ver
+    # hub/normalize.py::_split_labels_and_markings) son lo mas cercano a una
+    # clasificacion real del IOC (ej. "botnet", "phishing", "trojan"): se
+    # usa el PRIMERO como detalle despues del prefijo -- pedido explicito
+    # del operador (2026-08-18): "algo corto". Un indicador real puede traer
+    # una docena de labels a la vez (campanias, malware, TTPs...);
+    # concatenarlos todos producia valores de 140+ caracteres, lejos de los
+    # ejemplos pedidos (IP_MALICIOSA_BOTNET). `hub.normalize` solo saca el
+    # marcado TLP de `labels` -- otros marcados con la misma convencion
+    # "ALGO:valor" (ej. "PAP:GREEN", visto en datos reales) tambien se
+    # excluyen aca: no son clasificacion de amenaza, son control de manejo.
+    label = next(
+        (raw for raw in event.labels if ":" not in raw),
+        None,
+    )
+    suffix = _sanitize_for_cdb(label) if label else ""
+    return f"{prefix}_{suffix}" if suffix else prefix
 
 
 class WazuhCdbAdapter:
@@ -39,6 +91,10 @@ class WazuhCdbAdapter:
         # vacio despues de los dos puntos. `include_tag=true` en
         # format_options usa el subtype como valor en vez de dejarlo vacio,
         # para operadores que quieran distinguir el tipo de IOC en la lista.
+        # "Boolean membership" (valor vacio) sigue siendo el default -- el
+        # tag descriptivo (ej. "IP_MALICIOSA_BOTNET") es opt-in, para no
+        # sorprender a un operador que ya tenia una lista `include_tag=false`
+        # funcionando en su manager.
         self.include_tag: bool = bool(opts.get("include_tag", False))
         # Advertencia dejada dentro del propio archivo, no solo en el
         # docstring del modulo: el operador que abra el .cdb en el manager
@@ -61,7 +117,7 @@ class WazuhCdbAdapter:
         )
 
     def _render_line(self, value: str, _sort_key: float, meta: dict) -> str:
-        tag = meta.get("subtype", "") if self.include_tag else ""
+        tag = meta.get("tag", "") if self.include_tag else ""
         return f"{value}:{tag}"
 
     def _parse_line(self, line: str) -> Optional[str]:
@@ -85,7 +141,10 @@ class WazuhCdbAdapter:
             "value": event.normalized_value,
             "sort_key": event.modified_at.timestamp(),
             "meta": {
-                "subtype": event.subtype,
+                # Se calcula siempre (no solo si include_tag), es barato y
+                # asi un operador puede prender include_tag despues sin
+                # esperar a que cada IOC se vuelva a tocar.
+                "tag": _build_tag(event),
                 # Vence solo, con el tiempo, via FeedWriter.rebuild() -- ver hub/ttl.py.
                 "_expires_at": expiration.isoformat() if expiration else None,
             },

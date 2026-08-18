@@ -23,6 +23,16 @@ export class PoliciesService {
     return this.http.post<PolicyVersion>(this.base, payload);
   }
 
+  // Reasigna que destinos usan esta politica sin crear una version nueva
+  // (modelo N:1, 2026-08-18) -- reemplaza el set completo: agrega lo que
+  // falte, saca lo que ya no este en la lista.
+  updateAssignments(policyId: string, destinationIds: string[]): Observable<{ policy_id: string; destination_ids: string[] }> {
+    return this.http.put<{ policy_id: string; destination_ids: string[] }>(
+      `${this.base}/${encodeURIComponent(policyId)}/assignments`,
+      { destination_ids: destinationIds },
+    );
+  }
+
   simulate(policyId: string, sample?: unknown[], sampleSize = 50): Observable<SimulationReport> {
     return this.http.post<SimulationReport>(`${this.base}/${encodeURIComponent(policyId)}/simulate`, {
       sample: sample ?? null,

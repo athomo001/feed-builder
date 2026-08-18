@@ -24,7 +24,7 @@ from hub.adapters.factory import build_adapter, uses_circuit_breaker
 from hub.alert_rules import evaluate_cursor_not_advancing, evaluate_opencti_disconnected
 from hub.alerting import build_channels, notify_alerts
 from hub.alerting_store import init_db as init_alerts_db, list_alerts, resolve_alert, upsert_alert
-from hub.backfill import run_backfill
+from hub.backfill import run_backfill, run_backfill_observables
 from hub.config import HubConfig, load_config
 from hub.cursor_store import init_db as init_cursor_db, load_cursor, save_cursor
 from hub.delivery_queue_store import (
@@ -46,7 +46,7 @@ from hub.normalize import UnclassifiedIndicatorError
 from hub.opencti_settings_store import OpenCTIConnection, init_db as init_opencti_settings_db, resolve_opencti_connection
 from hub.pipeline import DedupState, process_envelope
 from hub.policy_store import get_active_version_for_destination, init_db as init_policies_db
-from hub.reconcile import run_reconciliation
+from hub.reconcile import run_reconciliation, run_reconciliation_observables
 from hub.retry import CircuitBreaker
 from hub.secret_encryption import load_cipher
 from hub.secrets_store import init_db as init_secrets_db
@@ -288,7 +288,27 @@ def run_backfill_phase(runtime: HubRuntime, connection: OpenCTIConnection):
         f"Backfill done: pages={result.pages} indicators={result.indicators_seen} "
         f"envelopes={result.envelopes_emitted} reason={result.stopped_reason}"
     )
-    return result
+    # Backfill de Observables crudos, aparte del de Indicators de arriba:
+    # en una instancia real, la mayoria del IOC vive ahi sin nunca
+    # promoverse a Indicator (ver docstring de hub/graphql_observable.py) --
+    # sin este segundo backfill, ese IOC nunca llegaba a los feeds pese a
+    # que el resto de la ingesta (Live Stream, reconciliacion) funcionara
+    # bien. Corre siempre despues del de Indicators (no en paralelo): son
+    # dos catalogos independientes de OpenCTI, no hay orden que importe
+    # entre ellos mas alla de mantener el log legible.
+    observable_result = run_backfill_observables(
+        connection.client,
+        since=since,
+        max_pages=config.backfill_max_pages,
+        page_size=config.backfill_page_size,
+        on_envelope=runtime.process,
+        should_stop=shutdown_requested,
+    )
+    _log(
+        f"Backfill observables done: pages={observable_result.pages} observables={observable_result.indicators_seen} "
+        f"envelopes={observable_result.envelopes_emitted} reason={observable_result.stopped_reason}"
+    )
+    return result, observable_result
 
 
 # --- Reconciliacion ------------------------------------------------------
@@ -311,7 +331,18 @@ def run_reconciliation_phase(runtime: HubRuntime, connection: OpenCTIConnection)
     )
     if report.gaps_found:
         _log(f"RECONCILE: gaps_found={len(report.gaps_found)}")
-    return report
+
+    observable_report = run_reconciliation_observables(
+        connection.client,
+        since=since,
+        seen_stix_ids=runtime.seen_stix_ids,
+        on_envelope=runtime.process,
+        max_pages=config.backfill_max_pages,
+        page_size=config.backfill_page_size,
+    )
+    if observable_report.gaps_found:
+        _log(f"RECONCILE_OBSERVABLES: gaps_found={len(observable_report.gaps_found)}")
+    return report, observable_report
 
 
 def _maybe_reconcile(runtime: HubRuntime, connection: OpenCTIConnection, next_reconcile_ts: float) -> float:

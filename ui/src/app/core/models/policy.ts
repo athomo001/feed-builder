@@ -9,7 +9,6 @@ export interface AllowedIOC {
 export interface PolicyVersion {
   policy_id: string;
   version: number;
-  destination_id: string;
   allowed_iocs: AllowedIOC[];
   ttl_days: Record<string, number>;
   // subtype -> cantidad maxima vigente (0/ausente = sin tope propio, usa el
@@ -25,11 +24,15 @@ export interface PolicySummary {
   policy_id: string;
   active_version: number | null;
   version_count: number;
+  // Destinos que tienen esta politica asignada ahora mismo (modelo N:1,
+  // 2026-08-18): una politica puede servir a varios destinos, un destino
+  // solo puede tener una politica a la vez -- ver hub/policy_store.py.
+  destination_ids: string[];
 }
 
 export interface PolicyCreate {
   policy_id: string;
-  destination_id: string;
+  destination_ids: string[];
   allowed_iocs: AllowedIOC[];
   ttl_days?: Record<string, number>;
   max_records?: Record<string, number>;

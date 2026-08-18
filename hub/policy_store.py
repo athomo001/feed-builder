@@ -30,7 +30,6 @@ class AllowedIOC(BaseModel):
 class PolicyVersion(BaseModel):
     policy_id: str
     version: int
-    destination_id: str
     allowed_iocs: list[AllowedIOC] = Field(default_factory=list)
     ttl_days: dict[str, int] = Field(default_factory=dict)  # subtype -> dias
     # subtype -> cantidad maxima de IOCs vigentes de ese subtipo (0/ausente =
@@ -57,7 +56,6 @@ def init_db(path: str) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS policy_versions (
             policy_id TEXT NOT NULL,
             version INTEGER NOT NULL,
-            destination_id TEXT NOT NULL,
             allowed_iocs TEXT NOT NULL,
             ttl_days TEXT NOT NULL,
             max_records TEXT NOT NULL DEFAULT '{}',
@@ -68,39 +66,70 @@ def init_db(path: str) -> sqlite3.Connection:
         )
         """
     )
-    # Migracion in-place para bases creadas antes de esta columna: SQLite no
-    # soporta "ADD COLUMN IF NOT EXISTS", asi que se chequea el esquema real.
+    # Modelo "una politica, varios destinos" (2026-08-18, pedido explicito
+    # del operador para no duplicar la misma politica a mano por cada
+    # destino nuevo): a que destino(s) aplica una politica ya no es un campo
+    # fijo de la version (una version puede servir para varios destinos a la
+    # vez), asi que vive en esta tabla aparte. PRIMARY KEY en destination_id
+    # (no en el par destination_id+policy_id) es lo que garantiza "un
+    # destino no puede tener 2 politicas": asignar una politica nueva a un
+    # destino reemplaza la fila existente en vez de agregar una segunda.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_assignments (
+            destination_id TEXT PRIMARY KEY,
+            policy_id TEXT NOT NULL,
+            assigned_at TEXT NOT NULL
+        )
+        """
+    )
+    # Migracion in-place: SQLite no soporta "ADD COLUMN IF NOT EXISTS", asi
+    # que se chequea el esquema real antes de cada ALTER.
     existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(policy_versions)").fetchall()}
     if "max_records" not in existing_columns:
         conn.execute("ALTER TABLE policy_versions ADD COLUMN max_records TEXT NOT NULL DEFAULT '{}'")
+    if "destination_id" in existing_columns:
+        # Bases creadas antes del modelo de arriba tenian destination_id
+        # como columna propia de policy_versions (unico modelo posible
+        # entonces: 1 politica = 1 destino fijo). Se migra ese vinculo a
+        # policy_assignments antes de sacar la columna, para no perder que
+        # destino usaba que politica. GROUP BY (no DISTINCT) porque en la
+        # practica cada policy_id historico tenia un unico destination_id
+        # -- no hay ambiguedad real que resolver, solo se necesita una fila
+        # por destino.
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT OR IGNORE INTO policy_assignments (destination_id, policy_id, assigned_at) "
+            "SELECT destination_id, policy_id, ? FROM policy_versions GROUP BY destination_id",
+            (now,),
+        )
+        conn.execute("ALTER TABLE policy_versions DROP COLUMN destination_id")
     conn.commit()
     return conn
 
 
-_COLUMNS = "policy_id, version, destination_id, allowed_iocs, ttl_days, max_records, status, created_at, published_at"
+_COLUMNS = "policy_id, version, allowed_iocs, ttl_days, max_records, status, created_at, published_at"
 
 
 def _row_to_version(row) -> PolicyVersion:
     return PolicyVersion(
         policy_id=row[0],
         version=row[1],
-        destination_id=row[2],
-        allowed_iocs=[AllowedIOC(**x) for x in json.loads(row[3])],
-        ttl_days=json.loads(row[4]),
-        max_records=json.loads(row[5]),
-        status=row[6],
-        created_at=row[7],
-        published_at=row[8],
+        allowed_iocs=[AllowedIOC(**x) for x in json.loads(row[2])],
+        ttl_days=json.loads(row[3]),
+        max_records=json.loads(row[4]),
+        status=row[5],
+        created_at=row[6],
+        published_at=row[7],
     )
 
 
 def _insert(conn: sqlite3.Connection, pv: PolicyVersion) -> None:
     conn.execute(
-        f"INSERT INTO policy_versions ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO policy_versions ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             pv.policy_id,
             pv.version,
-            pv.destination_id,
             json.dumps([a.model_dump() for a in pv.allowed_iocs]),
             json.dumps(pv.ttl_days),
             json.dumps(pv.max_records),
@@ -124,7 +153,6 @@ def create_draft(
     conn: sqlite3.Connection,
     *,
     policy_id: str,
-    destination_id: str,
     allowed_iocs: list[AllowedIOC],
     ttl_days: dict,
     max_records: Optional[dict] = None,
@@ -142,7 +170,6 @@ def create_draft(
     pv = PolicyVersion(
         policy_id=policy_id,
         version=next_version,
-        destination_id=destination_id,
         allowed_iocs=allowed_iocs,
         ttl_days=ttl_days,
         max_records=max_records or {},
@@ -151,6 +178,54 @@ def create_draft(
     )
     _insert(conn, pv)
     return pv
+
+
+# --- Asignacion politica <-> destino (modelo N:1: una politica puede servir
+# a varios destinos, pero un destino solo puede tener una politica activa a
+# la vez -- ver PRIMARY KEY en policy_assignments, init_db) ------------------
+
+
+def assign_policy_to_destination(conn: sqlite3.Connection, destination_id: str, policy_id: str, *, now: Optional[datetime] = None) -> None:
+    now = now or datetime.now(timezone.utc)
+    # UPSERT sobre la PK (destination_id): si el destino ya tenia otra
+    # politica asignada, esta la reemplaza -- es literalmente el mecanismo
+    # que garantiza "un destino no puede tener 2 politicas".
+    conn.execute(
+        "INSERT INTO policy_assignments (destination_id, policy_id, assigned_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(destination_id) DO UPDATE SET policy_id = excluded.policy_id, assigned_at = excluded.assigned_at",
+        (destination_id, policy_id, now.isoformat()),
+    )
+    conn.commit()
+
+
+def unassign_destination(conn: sqlite3.Connection, destination_id: str) -> None:
+    conn.execute("DELETE FROM policy_assignments WHERE destination_id = ?", (destination_id,))
+    conn.commit()
+
+
+def get_assigned_policy_id(conn: sqlite3.Connection, destination_id: str) -> Optional[str]:
+    row = conn.execute("SELECT policy_id FROM policy_assignments WHERE destination_id = ?", (destination_id,)).fetchone()
+    return row[0] if row else None
+
+
+def list_assignments_for_policy(conn: sqlite3.Connection, policy_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT destination_id FROM policy_assignments WHERE policy_id = ? ORDER BY destination_id", (policy_id,)
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def set_policy_assignments(conn: sqlite3.Connection, policy_id: str, destination_ids: list[str], *, now: Optional[datetime] = None) -> None:
+    """Deja exactamente estos destinos asignados a `policy_id`: agrega los
+    que faltan, saca los que ya no estan en la lista. No toca destinos que
+    ya apuntaban a OTRA politica salvo que esten en `destination_ids` (ahi
+    los reasigna, mismo mecanismo de reemplazo que `assign_policy_to_destination`)."""
+    current = set(list_assignments_for_policy(conn, policy_id))
+    target = set(destination_ids)
+    for destination_id in target - current:
+        assign_policy_to_destination(conn, destination_id, policy_id, now=now)
+    for destination_id in current - target:
+        unassign_destination(conn, destination_id)
 
 
 def list_policy_ids(conn: sqlite3.Connection) -> list[str]:
@@ -180,11 +255,10 @@ def get_active_version(conn: sqlite3.Connection, policy_id: str) -> Optional[Pol
 
 
 def get_active_version_for_destination(conn: sqlite3.Connection, destination_id: str) -> Optional[PolicyVersion]:
-    row = conn.execute(
-        f"SELECT {_COLUMNS} FROM policy_versions WHERE destination_id = ? AND status = 'published'",
-        (destination_id,),
-    ).fetchone()
-    return _row_to_version(row) if row else None
+    policy_id = get_assigned_policy_id(conn, destination_id)
+    if policy_id is None:
+        return None
+    return get_active_version(conn, policy_id)
 
 
 def publish(conn: sqlite3.Connection, policy_id: str, version: int, *, now: Optional[datetime] = None) -> PolicyVersion:

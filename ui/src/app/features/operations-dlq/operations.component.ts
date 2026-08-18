@@ -1,5 +1,5 @@
 import { DecimalPipe } from '@angular/common';
-import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -39,10 +39,28 @@ export class OperationsComponent {
   private readonly auth = inject(AuthService);
 
   readonly dlqColumns = ['event_id', 'stix_id', 'destination_id', 'state', 'attempts', 'error', 'actions'];
-  readonly feedColumns = ['feed_id', 'destination_id', 'subtype', 'entries', 'link', 'actions'];
+  // Agrupado por destino (ver feedsByDestination): dentro de cada grupo el
+  // destino ya es el titulo, asi que la fila no lo repite.
+  readonly feedColumns = ['subtype', 'entries', 'link', 'actions'];
 
   readonly deadLetters = pollingSignal<LedgerEntry[]>(() => this.deliveriesService.deadLetters(), 10000, []);
   readonly feeds = pollingSignal<FeedSummary[]>(() => this.feedsService.list(), FEED_POLL_INTERVAL_MS, []);
+
+  // Con varios destinos configurados (Wazuh, MikroTik, TXT...) una tabla
+  // plana mezclando todos los subtipos de todos los destinos se volvia
+  // dificil de revisar uno por uno -- pedido explicito del operador
+  // (2026-08-18): "que va soltando por destino, asi es mas facil de ver".
+  readonly feedsByDestination = computed(() => {
+    const groups = new Map<string, FeedSummary[]>();
+    for (const f of this.feeds()) {
+      const list = groups.get(f.destination_id) ?? [];
+      list.push(f);
+      groups.set(f.destination_id, list);
+    }
+    return Array.from(groups.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([destinationId, feeds]) => ({ destinationId, feeds }));
+  });
 
   // Destinos api_push con rate_limit_per_minute: lo que esta esperando
   // turno (PENDING en el ledger) porque el destino esta al tope de su tasa
@@ -128,6 +146,43 @@ export class OperationsComponent {
       .writeText(this.feedUrl(feed))
       .then(() => this.notifications.success('Link copiado.'))
       .catch(() => this.notifications.error('No se pudo copiar el link.'));
+  }
+
+  copyAllFeedUrls(): void {
+    const urls = this.feeds().map((f) => this.feedUrl(f));
+    if (!urls.length) return;
+    navigator.clipboard
+      .writeText(urls.join('\n'))
+      .then(() => this.notifications.success(`${urls.length} links copiados.`))
+      .catch(() => this.notifications.error('No se pudieron copiar los links.'));
+  }
+
+  // Export CSV client-side de la pagina cargada (mismo patron que
+  // audit.component.ts), sin endpoint de export nuevo.
+  exportFeedsCsv(): void {
+    const rows = this.feeds();
+    if (!rows.length) return;
+
+    const header = ['feed_id', 'destination_id', 'subtype', 'entries', 'link'];
+    const lines = [header.join(',')];
+    for (const f of rows) {
+      lines.push(
+        [f.feed_id, f.destination_id, f.subtype, f.entries, this.feedUrl(f)].map((v) => this.csvEscape(v)).join(','),
+      );
+    }
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `feeds-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  private csvEscape(value: unknown): string {
+    const text = value === null || value === undefined ? '' : String(value);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }
 
   rebuild(feed: FeedSummary): void {

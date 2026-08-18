@@ -12,13 +12,14 @@ import { IocTypesPickerComponent } from '../../shared/ioc-types-picker/ioc-types
 export interface PolicyCreateDialogData {
   destinations: Destination[];
   // Presente cuando el dialog se abre para "Editar" una politica existente
-  // (ver policies.component.ts::editPolicy): precarga policy_id/destino/
+  // (ver policies.component.ts::editPolicy): precarga policy_id/destinos/
   // tipos/TTL desde la version activa (o la mas reciente) en vez de arrancar
-  // en blanco. policy_id/destino quedan fijos -- son la identidad de la
-  // politica, no algo que "editar" tenga sentido de cambiar.
+  // en blanco. policy_id queda fijo (es la identidad de la politica); los
+  // destinos SI se pueden cambiar aca -- una politica puede servir a varios
+  // a la vez (modelo N:1, 2026-08-18).
   edit?: {
     policyId: string;
-    destinationId: string;
+    destinationIds: string[];
     allowedIocs: AllowedIOC[];
     ttlDays: Record<string, number>;
     maxRecords: Record<string, number>;
@@ -54,7 +55,11 @@ export class PolicyCreateDialogComponent {
 
   readonly isEdit = !!this.data.edit;
   readonly policyId = signal(this.data.edit?.policyId ?? '');
-  readonly destinationId = signal(this.data.edit?.destinationId ?? this.data.destinations[0]?.destination_id ?? '');
+  // Multi-select: una politica puede aplicarse a varios destinos a la vez
+  // (modelo N:1, 2026-08-18) -- pero un destino elegido aca deja de usar
+  // cualquier OTRA politica que tuviera antes (lo aplica el backend,
+  // hub/policy_store.py::assign_policy_to_destination).
+  readonly destinationIds = signal<string[]>(this.data.edit?.destinationIds ?? []);
   readonly allowedTypes = signal<string[]>(
     this.data.edit
       ? this.data.edit.allowedIocs.flatMap((a) => a.subtypes.map((s) => `${a.family}/${s}`))
@@ -114,8 +119,8 @@ export class PolicyCreateDialogComponent {
   }
 
   save(): void {
-    if (!this.policyId().trim() || !this.destinationId()) {
-      this.formError.set('policy_id y destino son obligatorios.');
+    if (!this.policyId().trim() || this.destinationIds().length === 0) {
+      this.formError.set('policy_id y al menos un destino son obligatorios.');
       return;
     }
     if (this.allowedTypes().length === 0) {
@@ -142,7 +147,7 @@ export class PolicyCreateDialogComponent {
 
     this.dialogRef.close({
       policy_id: this.policyId().trim(),
-      destination_id: this.destinationId(),
+      destination_ids: this.destinationIds(),
       allowed_iocs: allowedIocs,
       ttl_days: this.ttlDays(),
       max_records: maxRecords,

@@ -33,7 +33,7 @@ export class PoliciesComponent {
   private readonly notifications = inject(NotificationService);
   private readonly auth = inject(AuthService);
 
-  readonly summaryColumns = ['policy_id', 'active_version', 'version_count', 'actions'];
+  readonly summaryColumns = ['policy_id', 'active_version', 'version_count', 'destination_ids', 'actions'];
   readonly versionColumns = ['version', 'status', 'created_at', 'published_at', 'actions'];
 
   readonly policies = pollingSignal<PolicySummary[]>(() => this.policiesService.list(), 15000, []);
@@ -92,7 +92,7 @@ export class PoliciesComponent {
             destinations: this.destinations(),
             edit: {
               policyId: base.policy_id,
-              destinationId: base.destination_id,
+              destinationIds: summary.destination_ids,
               allowedIocs: base.allowed_iocs,
               ttlDays: base.ttl_days,
               maxRecords: base.max_records,
